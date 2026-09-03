@@ -1,0 +1,62 @@
+name: ai-monitoring
+
+services:
+  db:
+    # TimescaleDB on PostgreSQL 16. If the image is unavailable,
+    # plain postgres:16 works too (the backend falls back automatically).
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: monitoring
+      POSTGRES_PASSWORD: monitoring
+      POSTGRES_DB: monitoring
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitoring"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://monitoring:monitoring@db:5432/monitoring
+      REDIS_URL: redis://redis:6379/0
+      VLLM_API_URL: ${VLLM_API_URL:-http://172.17.0.1:8000}
+      OPEN_WEBUI_URL: ${OPEN_WEBUI_URL:-http://172.17.0.1:8080}
+      OPEN_WEBUI_API_TOKEN: ${OPEN_WEBUI_API_TOKEN:-}
+      COLLECT_INTERVAL: ${COLLECT_INTERVAL:-10}
+      PROMPT_RETENTION_DAYS: ${PROMPT_RETENTION_DAYS:-7}
+      SNAPSHOTS_RETENTION_DAYS: ${SNAPSHOTS_RETENTION_DAYS:-30}
+      LOG_FILE: ${LOG_FILE:-}
+      RUN_COLLECTOR: ${RUN_COLLECTOR:-true}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      MONITORING_PASSWORD: ${MONITORING_PASSWORD:-admin}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+    volumes:
+      - app_data:/app/data
+      - ./frontend/dist:/app/frontend:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  app_data:
