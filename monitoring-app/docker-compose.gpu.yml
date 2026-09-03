@@ -1,10 +1,16 @@
-# GPU override: mounts NVIDIA device files into the backend container so the
-# collector can read GPU metrics via pynvml (no CUDA driver inside needed).
+# GPU override: gives the backend container everything pynvml needs to read
+# GPU metrics on the host (no CUDA driver inside the container):
+#   1. device nodes   - /dev/nvidia* (ioctl interface)
+#   2. NVML library   - libnvidia-ml.so.1, part of the host NVIDIA driver,
+#                       lives in the host filesystem and is NOT visible from
+#                       the container unless bind-mounted.
 #
 # Usage on a host with an NVIDIA GPU:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 #
-# One "devices" line per GPU (/dev/nvidia1, /dev/nvidia2, ...).
+# If libnvidia-ml.so.1 is not at the standard path below, find it with:
+#   ldconfig -p | grep nvidia-ml
+# and adjust the mount source. One "devices" line per GPU.
 # On hosts without /dev/nvidia* (e.g. Apple Silicon) do NOT use this file.
 
 services:
@@ -14,3 +20,6 @@ services:
       - /dev/nvidiactl
       - /dev/nvidia-uvm
       - /dev/nvidia-uvm-tools
+    volumes:
+      # standard location on Ubuntu/Debian; on RHEL-like hosts use /usr/lib64/libnvidia-ml.so.1
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
