@@ -264,7 +264,9 @@ async function refreshLatest() {
     renderServices(d.services);
   } catch (e) {
     setConn(false);
-    $('#updated-at').textContent = 'нет соединения';
+    $('#updated-at').textContent = e.message === 'auth required'
+      ? 'нет доступа: введите логин/пароль'
+      : 'нет соединения';
   }
 }
 

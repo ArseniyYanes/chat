@@ -254,24 +254,22 @@ sudo systemctl reload caddy
 ## 9. GPU для коллектора (если GPU на этом сервере)
 
 Коллектор читает GPU через NVML (pynvml). В контейнере для этого нужно
-смонтировать device-узлы. Добавьте в `docker-compose.yml` в сервис
-`backend` (рядом с `volumes:`):
-
-```yaml
-    devices:
-      - /dev/nvidia0
-      - /dev/nvidia1        # по одному на каждую карту
-      - /dev/nvidiactl
-      - /dev/nvidia-uvm
-```
-
-Затем:
+смонтировать device-узлы. В комплекте готовый override-файл
+`docker-compose.gpu.yml` — его не нужно редактировать (если у вас больше
+одной карты, добавьте строку `/dev/nvidia1` и т.д.):
 
 ```bash
-docker compose up -d backend
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d backend
 # в логах должна появиться строка с gpu(nvml)=True:
 docker compose logs backend 2>&1 | grep 'collector started'
 ```
+
+> Почему отдельный файл, а не правка `docker-compose.yml`: в `devices`
+> перечислены реальные пути `/dev/nvidia*`. Если оставить их в основном
+> compose, стек перестанет подниматься на машинах без NVIDIA (Mac,
+> облачные CPU-инстансы и т.п.).
+
+> Если меняли сам compose-файл руками, используйте вашу версию.
 
 Проверка:
 

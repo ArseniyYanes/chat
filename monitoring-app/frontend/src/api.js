@@ -18,7 +18,12 @@ async function api(path, opts = {}) {
 }
 
 export const getLatest = () => api('/api/latest');
-export const getHistory = (metric, range) => api(`/api/history?metric=${metric}&range=${range}`);
+export const getHistory = (metric, range) => {
+  // minutes offset of local tz vs UTC (e.g. 180 for UTC+3) so server-side
+  // chart labels match the user's clock
+  const tz = -new Date().getTimezoneOffset();
+  return api(`/api/history?metric=${metric}&range=${range}&tz=${tz}`);
+};
 export const getRequests = (p) => {
   const q = new URLSearchParams(p).toString();
   return api(`/api/requests?${q}`);

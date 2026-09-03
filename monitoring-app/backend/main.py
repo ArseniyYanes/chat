@@ -205,14 +205,17 @@ def _extract_metric(row, metric):
 def history(
     metric: str = Query("cpu_pct"),
     range_key: str = Query("24h", alias="range"),
+    tz_min: int = Query(0, ge=-840, le=840, alias="tz"),
     db=Depends(get_session),
 ):
-    key = f"history:{metric}:{range_key}"
+    key = f"history:{metric}:{range_key}:{tz_min}"
     cached = cache.get_json(key)
     if cached:
         return cached
     hours, _points = RANGE_MAP.get(range_key, (24, 120))
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    # Client-side timezone offset in minutes (UTC -> local), e.g. +180 for UTC+3.
+    tz = timezone(timedelta(minutes=tz_min))
     labels = []
     values = []
     if range_key in ("7d", "30d") and metric in METRIC_FIELD:
@@ -226,7 +229,7 @@ def history(
             .all()
         )
         for r in rows:
-            labels.append(r.hour_bucket.strftime("%m-%d %H:%M"))
+            labels.append(r.hour_bucket.astimezone(tz).strftime("%m-%d %H:%M"))
             values.append(getattr(r, METRIC_FIELD[metric], None))
     if not labels:
         rows = (
@@ -243,7 +246,7 @@ def history(
             rows = [rows[int(i * step)] for i in range(360)]
         fmt = "%H:%M" if hours <= 24 else "%m-%d %H:%M"
         for r in rows:
-            labels.append(r.ts.strftime(fmt))
+            labels.append(r.ts.astimezone(tz).strftime(fmt))
             values.append(_extract_metric(r, metric))
     data = {"metric": metric, "range": range_key, "labels": labels, "values": values}
     cache.set_json(key, data, 120)

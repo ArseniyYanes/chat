@@ -100,10 +100,32 @@ def _dig(data, *keys):
     return cur
 
 
+def _mget(m, *names):
+    """First non-None metric value among alternative names.
+
+    vLLM renamed several Prometheus metrics across versions:
+      vLLM 0.8+:  vllm:gpu_cache_usage_perc        -> vllm:kv_cache_usage_perc
+                  vllm:num_prompt_tokens_processed_total    -> vllm:prompt_tokens_total
+                  vllm:num_generation_tokens_processed_total -> vllm:generation_tokens_total
+      vLLM 0.14+/0.2x:
+                  vllm:time_per_output_token_seconds -> vllm:inter_token_latency_seconds
+                  vllm:time_to_first_token_seconds   (only with detailed tracing;
+                                                      approximated as e2e - decode)
+                  prefix-cache hit rate gauge        -> counters
+                  vllm:prefix_cache_hits_total / vllm:prefix_cache_queries_total
+    We accept all variants so the collector works on any recent vLLM.
+    """
+    for n in names:
+        v = m.get(n)
+        if v is not None:
+            return v
+    return None
+
+
 class Collector:
     _TOK = {
-        "in": "vllm:num_prompt_tokens_processed_total",
-        "out": "vllm:num_generation_tokens_processed_total",
+        "in": ("vllm:num_prompt_tokens_processed_total", "vllm:prompt_tokens_total"),
+        "out": ("vllm:num_generation_tokens_processed_total", "vllm:generation_tokens_total"),
     }
 
     def __init__(self):
@@ -253,44 +275,75 @@ class Collector:
                 m = parse_prometheus(r.text)
                 out["active"] = m.get("vllm:num_requests_running")
                 out["waiting"] = m.get("vllm:num_requests_waiting")
-                kv = m.get("vllm:gpu_cache_usage_perc")
+                kv = _mget(m, "vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
                 if kv is not None:
                     out["kv_cache_pct"] = round(kv * 100, 2)
-                pc = m.get(
+                # --- prefix cache: gauge (old vLLM) or hit-rate from counters (0.2x)
+                pc = _mget(
+                    m,
                     "vllm:gpu_prefix_cache_hit_rate",
-                    m.get("vllm:cpu_prefix_cache_hit_rate"),
+                    "vllm:cpu_prefix_cache_hit_rate",
                 )
                 if pc is not None:
                     out["prefix_hit_pct"] = round(pc * 100, 2)
+                else:
+                    pc_hits = m.get("vllm:prefix_cache_hits_total")
+                    pc_quer = m.get("vllm:prefix_cache_queries_total")
+                    if pc_hits is not None and pc_quer is not None:
+                        ph = self._prev_vllm.get("pc_h")
+                        pq = self._prev_vllm.get("pc_q")
+                        if ph is not None and pq is not None:
+                            dh, dq = pc_hits - ph, pc_quer - pq
+                            if dq > 0 and dh >= 0 and dh <= dq:
+                                out["prefix_hit_pct"] = round(dh / dq * 100, 2)
+                        self._prev_vllm["pc_h"], self._prev_vllm["pc_q"] = pc_hits, pc_quer
+                # --- TTFT: direct metric or approximated as e2e - decode
                 ttft_sum, ttft_cnt = (
                     m.get("vllm:time_to_first_token_seconds_sum"),
                     m.get("vllm:time_to_first_token_seconds_count"),
                 )
-                if ttft_cnt:
-                    out["ttft_ms"] = round(ttft_sum / ttft_cnt * 1000, 1)
-                tpot_sum, tpot_cnt = (
-                    m.get("vllm:time_per_output_token_seconds_sum"),
-                    m.get("vllm:time_per_output_token_seconds_count"),
-                )
-                if tpot_cnt:
-                    out["tpot_ms"] = round(tpot_sum / tpot_cnt * 1000, 2)
                 e2e_sum, e2e_cnt = (
                     m.get("vllm:e2e_request_latency_seconds_sum"),
                     m.get("vllm:e2e_request_latency_seconds_count"),
                 )
+                dec_sum, dec_cnt = (
+                    m.get("vllm:request_decode_time_seconds_sum"),
+                    m.get("vllm:request_decode_time_seconds_count"),
+                )
+                if ttft_cnt:
+                    out["ttft_ms"] = round(ttft_sum / ttft_cnt * 1000, 1)
+                elif e2e_cnt and dec_cnt:
+                    approx = (e2e_sum - dec_sum) / e2e_cnt
+                    if approx >= 0:
+                        out["ttft_ms"] = round(approx * 1000, 1)
                 if e2e_cnt:
                     out["e2e_ms"] = round(e2e_sum / e2e_cnt * 1000)
+                # --- TPOT: inter-token latency histogram (0.2x) or legacy metric
+                tpot_sum, tpot_cnt = _mget(
+                    m,
+                    "vllm:inter_token_latency_seconds_sum",
+                    "vllm:time_per_output_token_seconds_sum",
+                ), _mget(
+                    m,
+                    "vllm:inter_token_latency_seconds_count",
+                    "vllm:time_per_output_token_seconds_count",
+                )
+                if tpot_cnt:
+                    out["tpot_ms"] = round(tpot_sum / tpot_cnt * 1000, 2)
+                # --- throughput: counters delta over snapshot interval
                 now = time.time()
                 if self._prev_vllm.get("ts"):
                     dt = max(now - self._prev_vllm["ts"], 0.001)
-                    for k, name in self._TOK.items():
-                        old, new = self._prev_vllm.get(k), m.get(name)
+                    for k, names in self._TOK.items():
+                        old, new = self._prev_vllm.get(k), _mget(m, *names)
                         if old is not None and new is not None and new >= old:
                             out[f"tokens_{k}_s"] = round((new - old) / dt, 1)
                 self._prev_vllm = {
-                    "in": m.get(self._TOK["in"]),
-                    "out": m.get(self._TOK["out"]),
+                    "in": _mget(m, *self._TOK["in"]),
+                    "out": _mget(m, *self._TOK["out"]),
                     "ts": now,
+                    "pc_h": m.get("vllm:prefix_cache_hits_total"),
+                    "pc_q": m.get("vllm:prefix_cache_queries_total"),
                 }
             else:
                 out["error"] = f"/metrics -> {r.status_code}"

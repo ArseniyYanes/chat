@@ -1,0 +1,16 @@
+# GPU override: mounts NVIDIA device files into the backend container so the
+# collector can read GPU metrics via pynvml (no CUDA driver inside needed).
+#
+# Usage on a host with an NVIDIA GPU:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+# One "devices" line per GPU (/dev/nvidia1, /dev/nvidia2, ...).
+# On hosts without /dev/nvidia* (e.g. Apple Silicon) do NOT use this file.
+
+services:
+  backend:
+    devices:
+      - /dev/nvidia0
+      - /dev/nvidiactl
+      - /dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools
