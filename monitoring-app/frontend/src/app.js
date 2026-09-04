@@ -458,6 +458,8 @@ function keyCard(k) {
       <div class="key-metric"><span>Токенов всего</span><b>${fmtNum(k.total_tokens, 0)}</b></div>
       <div class="key-metric"><span>Лимит, req/мин</span><b>${fmtNum(k.rate_limit, 0)}</b></div>
       <div class="key-metric"><span>Лимит, ток/день</span><b>${fmtNum(k.daily_token_limit, 0)}</b></div>
+      <div class="key-metric"><span>Ср. скорость ответа</span><b title="Токены/сек за всё время ключа">${k.avg_tokens_per_s != null ? `${fmtNum(k.avg_tokens_per_s, 1)} ток/с` : '—'}</b></div>
+      <div class="key-metric"><span>Ср. задержка</span><b title="Среднее время ответа за всё время ключа">${k.avg_latency_ms != null ? fmtMs(k.avg_latency_ms) : '—'}</b></div>
     </div>
     <div class="key-chart-wrap"><canvas id="kchart-${k.id}"></canvas></div>
     <div class="key-usage-head muted">История запросов (последние 30)</div>
@@ -521,13 +523,14 @@ async function drawKeyUsage(k) {
       return;
     }
     box.innerHTML = `<table class="table usage-tbl"><thead><tr>
-      <th>Время</th><th>in</th><th>out</th><th>всего</th><th>статус</th><th>IP</th>
+      <th>Время</th><th>in</th><th>out</th><th>всего</th><th>задержка</th><th>статус</th><th>IP</th>
     </tr></thead><tbody>` +
       items.map((r) => `<tr>
       <td>${fmtTs(r.request_time)}</td>
       <td>${fmtNum(r.input_tokens, 0)}</td>
       <td>${fmtNum(r.output_tokens, 0)}</td>
       <td>${fmtNum(r.total_tokens, 0)}</td>
+      <td>${r.latency_ms != null ? fmtMs(r.latency_ms) : '—'}</td>
       <td><span class="badge ${r.status_code < 400 ? 'ok' : 'err'}">${r.status_code ?? '—'}</span></td>
       <td class="mono muted">${esc(r.ip_address || '—')}</td>
     </tr>`).join('') +

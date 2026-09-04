@@ -85,9 +85,9 @@ tar xzf monitoring-app.tgz -C ~
 
 ## 4. Сборка фронтенда
 
-Бэкенд раздаёт `frontend/dist` как статику, поэтому **до первого запуска**
-нужно собрать фронт. Node.js на сервере для этого не нужен — соберём
-в контейнере:
+Бэкенд раздаёт собранный фронтенд **из образа** (`/app/frontend`), поэтому
+**до первого запуска** нужно собрать фронт и вшить его в контекст сборки
+образа. Node.js на сервере для этого не нужен — соберём в контейнере:
 
 ```bash
 cd ~/monitoring-app
@@ -95,10 +95,18 @@ docker run --rm \
   -v "$PWD/frontend":/app -w /app \
   node:22-alpine sh -c "npm ci && npm run build"
 ls frontend/dist/   # → index.html + assets/
+
+# ОБЯЗАТЕЛЬНО: вшиваем сборку в контекст образа бэкенда,
+# иначе в контейнере /app/frontend будет пуст:
+rm -rf backend/frontend && cp -R frontend/dist backend/frontend
 ```
 
 > Если Node.js на сервере всё-таки есть — `npm --prefix frontend ci &&
 > npm --prefix frontend run build` — то же самое.
+>
+> `backend/frontend/` — это не исходники, а именно копия `dist`;
+> Dockerfile копирует её в образ (`COPY . .`). При каждом обновлении
+> фронтенда повторяйте копирование (раздел 12.1).
 
 ---
 
@@ -367,9 +375,10 @@ json-file-логи растут безлимитно). Добавьте в `dock
 cd ~/monitoring-app
 # 1) код: git pull (или rsync/tar по-старому)
 git pull
-# 2) если менялся фронтенд — пересобрать dist (раздел 4):
+# 2) если менялся фронтенд — пересобрать dist и вшить в контекст (раздел 4):
 docker run --rm -v "$PWD/frontend":/app -w /app \
   node:22-alpine sh -c "npm ci && npm run build"
+rm -rf backend/frontend && cp -R frontend/dist backend/frontend
 # 3) пересобрать образ бэкенда и поднять:
 docker compose up -d --build
 docker compose ps
@@ -461,7 +470,8 @@ docker system prune -f                  # очистка мусора (без -a
 - [ ] Docker установлен: `docker compose version` отвечает
 - [ ] Код на сервере: `~/monitoring-app` с `backend/`, `frontend/`,
       `docker-compose.yml`, `.env.example`
-- [ ] Фронт собран: `frontend/dist/index.html` существует
+- [ ] Фронт собран и вшит: `frontend/dist/index.html` существует
+      И `backend/frontend/index.html` скопирован (раздел 4)
 - [ ] `.env` создан, `MONITORING_PASSWORD` не `admin`, URL vLLM/OWUI верные
 - [ ] (если GPU на сервере) `devices` для NVIDIA в compose
 - [ ] `docker compose up -d` → `docker compose ps`: db/redis healthy,

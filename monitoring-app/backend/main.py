@@ -12,7 +12,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from sqlalchemy import Date, func, select, text
+from sqlalchemy import Date, case, func, select, text
 
 import apiproxy
 import cache
@@ -460,10 +460,30 @@ def _key_dict(k: ApiKey) -> dict:
         "daily_token_limit": k.daily_token_limit,
         "total_requests": k.total_requests or 0,
         "total_tokens": k.total_tokens or 0,
+        **_key_speed(k),
     }
 
 
-def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip):
+def _key_speed(k: ApiKey) -> dict:
+    """Average response latency (ms/req) and generation speed (tokens/s).
+
+    Both are derived from the denormalized lifetime counters on the key,
+    so no extra aggregation query is needed.
+    """
+    reqs = k.total_requests or 0
+    total_ms = k.total_latency_ms or 0
+    if not reqs or not total_ms:
+        return {"avg_latency_ms": None, "avg_tokens_per_s": None}
+    avg_latency_ms = round(total_ms / reqs)
+    avg_tokens_per_s = round((k.total_tokens or 0) / (total_ms / 1000.0), 2)
+    return {
+        "avg_latency_ms": avg_latency_ms,
+        "avg_tokens_per_s": avg_tokens_per_s or None,
+    }
+
+
+def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip,
+                  latency_ms=None):
     """Persist usage to Postgres and bump the Redis daily token counter.
 
     Opened in its own session; safe to call after the response has started.
@@ -476,6 +496,7 @@ def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip
             if row:
                 row.total_requests = (row.total_requests or 0) + 1
                 row.total_tokens = (row.total_tokens or 0) + total
+                row.total_latency_ms = (row.total_latency_ms or 0) + (latency_ms or 0)
                 row.last_used_at = datetime.now(timezone.utc)
             db.add(
                 ApiUsageLog(
@@ -487,6 +508,7 @@ def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip
                     endpoint=endpoint,
                     status_code=status_code,
                     ip_address=ip,
+                    latency_ms=latency_ms,
                 )
             )
             db.commit()
@@ -631,6 +653,7 @@ def key_usage(
                 "total_tokens": r.total_tokens or 0,
                 "status_code": r.status_code,
                 "ip_address": r.ip_address,
+                "latency_ms": r.latency_ms,
             }
             for r in rows
         ]
@@ -808,14 +831,17 @@ async def vllm_chat_completions(request: Request):
         fwd_headers["authorization"] = f"Bearer {CFG.vllm_api_key}"
 
     if not stream:
+        t0 = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 r = await client.post(url, content=fwd_body, headers=fwd_headers)
         except Exception as exc:
-            _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip)
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip, latency_ms)
             return JSONResponse(
                 status_code=502, content={"error": {"message": f"vLLM unreachable: {exc}"}}
             )
+        latency_ms = round((time.monotonic() - t0) * 1000)
         in_t = out_t = 0
         try:
             usage = r.json().get("usage") or {}
@@ -825,7 +851,9 @@ async def vllm_chat_completions(request: Request):
             pass
         if in_t == 0 and out_t == 0:
             in_t, out_t = _estimate_tokens(raw_body)
-        _record_usage(key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip)
+        _record_usage(
+            key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
+        )
         return Response(
             content=r.content,
             status_code=r.status_code,
@@ -836,6 +864,7 @@ async def vllm_chat_completions(request: Request):
         in_t = out_t = 0
         status = 200
         completion = []
+        t0 = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 async with client.stream(
@@ -868,7 +897,10 @@ async def vllm_chat_completions(request: Request):
         finally:
             if in_t == 0 and out_t == 0:
                 in_t, out_t = _estimate_tokens(raw_body, "".join(completion))
-            _record_usage(key_id, status, in_t, out_t, "/v1/chat/completions", client_ip)
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            _record_usage(
+                key_id, status, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
+            )
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

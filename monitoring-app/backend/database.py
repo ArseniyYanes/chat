@@ -27,6 +27,22 @@ def init_db() -> None:
     import models  # noqa: F401  (register ORM models)
 
     Base.metadata.create_all(engine)
+    # create_all never alters existing tables, so backfill columns that were
+    # added after the initial schema. Both ALTERs are idempotent no-ops on a
+    # fresh install (the tables are created with the columns already present).
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE api_usage_logs ADD COLUMN IF NOT EXISTS latency_ms INTEGER")
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS total_latency_ms BIGINT "
+                    "NOT NULL DEFAULT 0"
+                )
+            )
+    except Exception as exc:
+        log.warning("latency column backfill skipped: %s", exc)
     try:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))

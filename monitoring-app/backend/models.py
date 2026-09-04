@@ -133,6 +133,7 @@ class ApiKey(Base):
     daily_token_limit = Column(Integer, default=1000000)  # tokens / day
     total_requests = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
+    total_latency_ms = Column(Integer, default=0)  # sum of per-request durations
 
 
 class ApiUsageLog(Base):
@@ -151,3 +152,4 @@ class ApiUsageLog(Base):
     endpoint = Column(String(255), nullable=True)
     status_code = Column(Integer, nullable=True)
     ip_address = Column(String(45), nullable=True)
+    latency_ms = Column(Integer, nullable=True)  # end-to-end proxy duration
