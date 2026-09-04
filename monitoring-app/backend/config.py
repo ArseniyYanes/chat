@@ -17,6 +17,11 @@ class Config:
     vllm_url: str = os.getenv("VLLM_API_URL", "http://172.17.0.1:8000").rstrip("/")
     openwebui_url: str = os.getenv("OPEN_WEBUI_URL", "http://172.17.0.1:8080").rstrip("/")
     openwebui_token: str = os.getenv("OPEN_WEBUI_API_TOKEN", "")
+    # Optional shared secret for talking to vLLM itself. If set, the proxy
+    # forwards `Authorization: Bearer <VLLM_API_KEY>` to vLLM, so vLLM can be
+    # started with `--api-key=<same>` and bound to localhost. Clients then can
+    # only reach the model through this gateway (which enforces per-client keys).
+    vllm_api_key: str = os.getenv("VLLM_API_KEY", "")
 
     # Collector
     collect_interval: float = float(os.getenv("COLLECT_INTERVAL", "10"))

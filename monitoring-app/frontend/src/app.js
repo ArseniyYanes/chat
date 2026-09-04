@@ -2,7 +2,7 @@ import Chart from 'chart.js/auto';
 import {
   getLatest, getHistory, getRequests, restartService, testRequest,
   getSettings, putSettings, getActions, notifyTest,
-  getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats, getKeyUsage,
+  getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats, getKeyUsage, getKeysSummary,
   fmtBytes, fmtRate, fmtMs, fmtPct, fmtTs, fmtNum,
 } from './api.js';
 
@@ -34,6 +34,8 @@ const state = {
 let chart = null;
 let keysCache = [];
 let keyCharts = {};
+let summaryChart = null;
+let proxyUrl = '';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -558,6 +560,65 @@ async function loadKeys() {
     keysCache = [];
     wrap.innerHTML = `<div class="muted">${esc(e.message)}</div>`;
   }
+  loadKeysSummary();
+}
+
+async function loadKeysSummary() {
+  try {
+    const s = await getKeysSummary();
+    const t = s.totals || {};
+    $('#ks-total-keys').textContent = fmtNum(t.total_keys, 0);
+    $('#ks-active-keys').textContent = `${fmtNum(t.active_keys, 0)} / ${fmtNum(t.blocked_keys, 0)}`;
+    $('#ks-total-req').textContent = fmtNum(t.total_requests, 0);
+    $('#ks-total-tok').textContent = fmtNum(t.total_tokens, 0);
+    $('#ks-today-req').textContent = fmtNum(t.today_requests, 0);
+    $('#ks-today-tok').textContent = fmtNum(t.today_tokens, 0);
+
+    if (s.proxy && s.proxy.chat_completions) {
+      proxyUrl = s.proxy.chat_completions;
+      const el = $('#proxy-url');
+      if (el) el.textContent = proxyUrl;
+    }
+
+    const cv = document.getElementById('keys-summary-chart');
+    if (cv && s.series) {
+      if (summaryChart) { summaryChart.destroy(); summaryChart = null; }
+      summaryChart = new Chart(cv, {
+        type: 'line',
+        data: {
+          labels: (s.series.days || []).map((d) => d.slice(5)),
+          datasets: [
+            {
+              label: 'токены',
+              data: s.series.tokens || [],
+              borderColor: '#4f8cff',
+              backgroundColor: 'rgba(79,140,255,0.18)',
+              tension: 0.3, fill: true, pointRadius: 2,
+            },
+            {
+              label: 'запросы',
+              data: s.series.requests || [],
+              borderColor: '#2fd0a5',
+              backgroundColor: 'rgba(47,208,165,0.15)',
+              tension: 0.3, fill: false, pointRadius: 2,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: { legend: { labels: { color: '#9fb0c6' } } },
+          scales: {
+            x: { ticks: { color: '#7d8a9e', maxRotation: 0 }, grid: { display: false } },
+            y: { ticks: { color: '#7d8a9e' }, grid: { color: '#252d3d' } },
+          },
+        },
+      });
+    }
+  } catch (e) {
+    /* summary is best-effort */
+  }
 }
 
 function openGenerateModal() {
@@ -644,6 +705,16 @@ function openKeyReveal(r) {
 
 function bindKeys() {
   $('#keys-generate').addEventListener('click', openGenerateModal);
+  const pc = $('#proxy-copy');
+  if (pc) {
+    pc.addEventListener('click', async () => {
+      if (!proxyUrl) { toast('URL ещё не загружен', 'err'); return; }
+      await copyText(proxyUrl);
+      const prev = pc.textContent;
+      pc.textContent = '✓ Скопировано';
+      setTimeout(() => { pc.textContent = prev; }, 1500);
+    });
+  }
   $('#keys-list').addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;

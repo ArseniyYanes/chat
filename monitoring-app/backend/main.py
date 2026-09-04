@@ -637,6 +637,95 @@ def key_usage(
     }
 
 
+@app.get("/api/keys/summary")
+def keys_summary(
+    request: Request,
+    user: str = Depends(require_auth),
+    db=Depends(get_session),
+):
+    """Aggregate usage across all keys + the proxy endpoint a client should call."""
+    now = datetime.now(timezone.utc)
+    day = func.date(ApiUsageLog.request_time)
+    seven_ago = now - timedelta(days=6)
+
+    # Totals (all time) straight from the denormalized counters on api_keys.
+    tot = db.execute(
+        select(
+            func.count(ApiKey.id),
+            func.sum(ApiKey.total_requests),
+            func.sum(ApiKey.total_tokens),
+            func.coalesce(func.sum(case((ApiKey.is_active.is_(True), 1), else_=0)), 0),
+        )
+    ).one()
+    total_keys, total_requests, total_tokens, active_keys = int(tot[0]), int(tot[1] or 0), int(tot[2] or 0), int(tot[3])
+
+    # Today's usage from the raw logs.
+    start_of_day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    today = db.execute(
+        select(func.count(ApiUsageLog.id), func.coalesce(func.sum(ApiUsageLog.total_tokens), 0))
+        .where(ApiUsageLog.request_time >= start_of_day)
+    ).one()
+
+    # 7-day series across all keys (for the overview line).
+    srows = (
+        db.execute(
+            select(day.label("d"), func.sum(ApiUsageLog.total_tokens), func.count(ApiUsageLog.id))
+            .where(ApiUsageLog.request_time >= seven_ago)
+            .group_by(day)
+        )
+    ).all()
+    s_by_day = {str(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in srows}
+    series_days, series_tokens, series_requests = [], [], []
+    for i in range(6, -1, -1):
+        d = (now - timedelta(days=i)).date()
+        series_days.append(d.isoformat())
+        used = s_by_day.get(str(d), (0, 0))
+        series_tokens.append(used[0])
+        series_requests.append(used[1])
+
+    # Per-key 7-day tokens (for the bar) merged with lifetime totals.
+    prows = (
+        db.execute(
+            select(ApiUsageLog.api_key_id, func.sum(ApiUsageLog.total_tokens))
+            .where(ApiUsageLog.request_time >= seven_ago)
+            .group_by(ApiUsageLog.api_key_id)
+        )
+    ).all()
+    p7 = {r[0]: int(r[1] or 0) for r in prows}
+    keys = db.execute(select(ApiKey)).scalars().all()
+    per_key = [
+        {
+            "id": k.id,
+            "name": k.name,
+            "is_active": bool(k.is_active),
+            "total_requests": k.total_requests or 0,
+            "total_tokens": k.total_tokens or 0,
+            "tokens_7d": p7.get(k.id, 0),
+        }
+        for k in keys
+    ]
+
+    # Build the public proxy base URL the client should point at.
+    base = str(request.base_url).rstrip("/")
+    return {
+        "totals": {
+            "total_keys": total_keys,
+            "active_keys": active_keys,
+            "blocked_keys": total_keys - active_keys,
+            "total_requests": total_requests,
+            "total_tokens": total_tokens,
+            "today_requests": int(today[0] or 0),
+            "today_tokens": int(today[1] or 0),
+        },
+        "series": {"days": series_days, "tokens": series_tokens, "requests": series_requests},
+        "per_key": per_key,
+        "proxy": {
+            "chat_completions": f"{base}/v1/chat/completions",
+            "base": base,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # vLLM proxy with API-key authentication
 # ---------------------------------------------------------------------------
@@ -714,6 +803,9 @@ async def vllm_chat_completions(request: Request):
         if k.lower() not in ("host", "authorization", "content-length", "content-encoding")
     }
     fwd_headers.setdefault("content-type", "application/json")
+    # Defense-in-depth: if vLLM is protected by its own --api-key, send it.
+    if CFG.vllm_api_key:
+        fwd_headers["authorization"] = f"Bearer {CFG.vllm_api_key}"
 
     if not stream:
         try:

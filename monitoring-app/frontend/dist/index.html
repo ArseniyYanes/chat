@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Monitoring</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <script type="module" crossorigin src="./assets/index-hOHXgQRo.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-DGrrwYXC.css">
+    <script type="module" crossorigin src="./assets/index-BkvbYT_Y.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-C0JqXTyv.css">
   </head>
   <body>
     <header class="topbar">
@@ -113,10 +113,27 @@
             <button id="keys-generate" class="btn primary">+ Сгенерировать новый ключ</button>
           </div>
           <p class="muted key-hint">
-            Запросы к <span class="mono">/v1/chat/completions</span> идут через backend с
-            заголовком <span class="mono">Authorization: Bearer &lt;ключ&gt;</span>. В БД хранится
-            только SHA256-хеш — ключ показывается один раз при создании.
+            vLLM доступен <b>только через этот шлюз</b>. Направляйте клиентов на
+            <span class="mono" id="proxy-url">…</span>
+            <button id="proxy-copy" class="btn small" type="button">📋 Копировать</button>
+            с заголовком
+            <span class="mono">Authorization: Bearer &lt;ключ&gt;</span> (кнопка «Копировать»
+            рядом). Прямые обращения к vLLM (<span class="mono">:8000</span>) не учитываются
+            в статистике. В БД хранится только SHA256-хеш — ключ показывается один раз.
           </p>
+
+          <div id="keys-summary" class="keys-summary">
+            <div class="sum-grid">
+              <div class="sum-tile"><span>Ключей всего</span><b id="ks-total-keys">—</b></div>
+              <div class="sum-tile"><span>Активных / заблокировано</span><b id="ks-active-keys">—</b></div>
+              <div class="sum-tile"><span>Запросов через шлюз (всего)</span><b id="ks-total-req">—</b></div>
+              <div class="sum-tile"><span>Токенов через шлюз (всего)</span><b id="ks-total-tok">—</b></div>
+              <div class="sum-tile"><span>Сегодня: запросы</span><b id="ks-today-req">—</b></div>
+              <div class="sum-tile"><span>Сегодня: токены</span><b id="ks-today-tok">—</b></div>
+            </div>
+            <div class="sum-chart-wrap"><canvas id="keys-summary-chart"></canvas></div>
+          </div>
+
           <div id="keys-list" class="keys-list"></div>
         </div>
       </section>
