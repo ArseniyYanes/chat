@@ -1,5 +1,7 @@
 """FastAPI application: monitoring API + static frontend serving."""
 import asyncio
+import hmac
+import json
 import logging
 import os
 import time
@@ -7,11 +9,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from sqlalchemy import select, text
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from sqlalchemy import Date, func, select, text
 
+import apiproxy
 import cache
 from auth import require_auth
 from collector import _dig, run_forever
@@ -20,6 +23,8 @@ import database
 from database import SessionLocal, init_db
 from models import (
     AdminAction,
+    ApiKey,
+    ApiUsageLog,
     HourlyAgg,
     MetricSnapshot,
     RequestLog,
@@ -438,6 +443,252 @@ def actions(limit: int = Query(50, le=500), db=Depends(get_session)):
             for r in rows
         ]
     }
+
+
+# ---------------------------------------------------------------------------
+# API keys management
+# ---------------------------------------------------------------------------
+def _key_dict(k: ApiKey) -> dict:
+    return {
+        "id": k.id,
+        "name": k.name,
+        "prefix": k.prefix,
+        "created_at": k.created_at.isoformat() if k.created_at else None,
+        "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+        "is_active": bool(k.is_active),
+        "rate_limit": k.rate_limit,
+        "daily_token_limit": k.daily_token_limit,
+        "total_requests": k.total_requests or 0,
+        "total_tokens": k.total_tokens or 0,
+    }
+
+
+def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip):
+    """Persist usage to Postgres and bump the Redis daily token counter.
+
+    Opened in its own session; safe to call after the response has started.
+    """
+    total = (input_tokens or 0) + (output_tokens or 0)
+    try:
+        db = SessionLocal()
+        try:
+            row = db.get(ApiKey, key_id)
+            if row:
+                row.total_requests = (row.total_requests or 0) + 1
+                row.total_tokens = (row.total_tokens or 0) + total
+                row.last_used_at = datetime.now(timezone.utc)
+            db.add(
+                ApiUsageLog(
+                    api_key_id=key_id,
+                    request_time=datetime.now(timezone.utc),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total,
+                    endpoint=endpoint,
+                    status_code=status_code,
+                    ip_address=ip,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:  # never let bookkeeping break the request
+        log.warning("api-key usage bookkeeping failed: %s", exc)
+    apiproxy.record_tokens(key_id, total)
+
+
+@app.get("/api/keys")
+def list_keys(user: str = Depends(require_auth), db=Depends(get_session)):
+    rows = db.execute(select(ApiKey).order_by(ApiKey.created_at.desc())).scalars().all()
+    return {"items": [_key_dict(k) for k in rows]}
+
+
+@app.post("/api/keys")
+def create_key(payload: dict, user: str = Depends(require_auth), db=Depends(get_session)):
+    master = str(payload.get("master_password") or "")
+    if not CFG.master_password or not hmac.compare_digest(master, CFG.master_password):
+        raise HTTPException(status_code=401, detail="Неверный мастер-пароль")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Название ключа обязательно")
+    try:
+        rate_limit = int(payload.get("rate_limit") or 60)
+        daily_token_limit = int(payload.get("daily_token_limit") or 1000000)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректные лимиты")
+    raw = apiproxy.generate_key()
+    row = ApiKey(
+        name=name,
+        key_hash=apiproxy.hash_key(raw),
+        prefix=apiproxy.display_prefix(raw),
+        rate_limit=rate_limit,
+        daily_token_limit=daily_token_limit,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    log_action(db, user, "api-key.create", {"name": name, "prefix": row.prefix})
+    # The full key is returned exactly once; only its hash is kept.
+    return {"key": raw, "prefix": row.prefix, "item": _key_dict(row)}
+
+
+@app.post("/api/keys/{key_id}/block")
+def block_key(key_id: str, user: str = Depends(require_auth), db=Depends(get_session)):
+    row = db.get(ApiKey, key_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    row.is_active = False
+    db.commit()
+    log_action(db, user, "api-key.block", {"name": row.name})
+    return _key_dict(row)
+
+
+@app.post("/api/keys/{key_id}/unblock")
+def unblock_key(key_id: str, user: str = Depends(require_auth), db=Depends(get_session)):
+    row = db.get(ApiKey, key_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    row.is_active = True
+    db.commit()
+    log_action(db, user, "api-key.unblock", {"name": row.name})
+    return _key_dict(row)
+
+
+@app.delete("/api/keys/{key_id}")
+def delete_key(key_id: str, user: str = Depends(require_auth), db=Depends(get_session)):
+    row = db.get(ApiKey, key_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    db.execute(ApiUsageLog.__table__.delete().where(ApiUsageLog.api_key_id == key_id))
+    db.delete(row)
+    db.commit()
+    log_action(db, user, "api-key.delete", {"name": row.name})
+    return {"detail": "ok"}
+
+
+@app.get("/api/keys/{key_id}/stats")
+def key_stats(key_id: str, user: str = Depends(require_auth), db=Depends(get_session)):
+    """Daily token/request usage for the last 7 days (for the mini chart)."""
+    if not db.get(ApiKey, key_id):
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    now = datetime.now(timezone.utc)
+    day = func.date(ApiUsageLog.request_time)
+    rows = (
+        db.execute(
+            select(day.label("d"), func.sum(ApiUsageLog.total_tokens), func.count(ApiUsageLog.id))
+            .where(
+                ApiUsageLog.api_key_id == key_id,
+                ApiUsageLog.request_time >= now - timedelta(days=6),
+            )
+            .group_by(day)
+        )
+    ).all()
+    by_day = {str(r[0]): (r[1] or 0, r[2] or 0) for r in rows}
+    labels, tokens, requests = [], [], []
+    for i in range(6, -1, -1):
+        d = (now - timedelta(days=i)).date()
+        labels.append(d.isoformat())
+        used = by_day.get(str(d), (0, 0))
+        tokens.append(used[0])
+        requests.append(used[1])
+    return {"days": labels, "tokens": tokens, "requests": requests}
+
+
+# ---------------------------------------------------------------------------
+# vLLM proxy with API-key authentication
+# ---------------------------------------------------------------------------
+def _bearer_key(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    return auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
+
+
+def _lookup_key(raw: str):
+    db = SessionLocal()
+    try:
+        return db.execute(
+            select(ApiKey).where(ApiKey.key_hash == apiproxy.hash_key(raw))
+        ).scalars().first()
+    finally:
+        db.close()
+
+
+@app.post("/v1/chat/completions")
+async def vllm_chat_completions(request: Request):
+    """Authenticating reverse-proxy for vLLM /v1/chat/completions."""
+    raw_body = await request.body()
+    client_ip = request.client.host if request.client else ""
+    key = _lookup_key(_bearer_key(request))
+    if not key or not key.is_active:
+        return JSONResponse(status_code=401, content={"error": {"message": "Invalid API key"}})
+    if not apiproxy.check_rate_limit(key.id, key.rate_limit):
+        return JSONResponse(status_code=429, content={"error": {"message": "Rate limit exceeded"}})
+    if not apiproxy.check_daily_tokens(key.id, key.daily_token_limit):
+        return JSONResponse(status_code=429, content={"error": {"message": "Daily token limit exceeded"}})
+    key_id = key.id
+
+    try:
+        body = json.loads(raw_body) if raw_body else {}
+    except Exception:
+        body = {}
+    stream = bool(body.get("stream"))
+    url = CFG.vllm_url + "/v1/chat/completions"
+    fwd_headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in ("host", "authorization", "content-length", "content-encoding")
+    }
+    fwd_headers.setdefault("content-type", "application/json")
+
+    if not stream:
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                r = await client.post(url, content=raw_body, headers=fwd_headers)
+        except Exception as exc:
+            _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip)
+            return JSONResponse(
+                status_code=502, content={"error": {"message": f"vLLM unreachable: {exc}"}}
+            )
+        in_t = out_t = 0
+        try:
+            usage = r.json().get("usage") or {}
+            in_t = int(usage.get("prompt_tokens") or 0)
+            out_t = int(usage.get("completion_tokens") or 0)
+        except Exception:
+            pass
+        _record_usage(key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip)
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            media_type=r.headers.get("content-type", "application/json"),
+        )
+
+    async def gen():
+        in_t = out_t = 0
+        status = 200
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                async with client.stream("POST", url, content=raw_body, headers=fwd_headers) as resp:
+                    status = resp.status_code
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+                        for line in chunk.decode("utf-8", "ignore").split("\n"):
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            payload = line[5:].strip()
+                            if payload in ("", "[DONE]"):
+                                continue
+                            try:
+                                usage = json.loads(payload).get("usage")
+                            except Exception:
+                                continue
+                            if usage:
+                                in_t = int(usage.get("prompt_tokens") or 0)
+                                out_t = int(usage.get("completion_tokens") or 0)
+        finally:
+            _record_usage(key_id, status, in_t, out_t, "/v1/chat/completions", client_ip)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/{path:path}")

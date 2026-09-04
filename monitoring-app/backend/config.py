@@ -27,6 +27,8 @@ class Config:
     # Auth
     admin_user: str = os.getenv("ADMIN_USER", "admin")
     admin_password: str = os.getenv("MONITORING_PASSWORD", "admin")
+    # Master password required to generate new API keys.
+    master_password: str = os.getenv("MASTER_PASSWORD", "apiopenlabs")
 
     # App
     app_data_dir: str = os.getenv("APP_DATA_DIR", "/app/data")

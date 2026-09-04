@@ -179,6 +179,94 @@ label.check { flex-direction: row; align-items: center; }
 .toast.err { border-left-color: var(--err); }
 .toast.ok { border-left-color: var(--ok); }
 
+/* --- API keys tab --------------------------------------------------------- */
+.key-hint { margin: 4px 0 16px; line-height: 1.5; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.keys-list { display: grid; gap: 16px; }
+
+.key-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: cardIn 0.3s ease;
+}
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.key-card.blocked { border-color: rgba(255, 93, 93, 0.5); }
+
+.key-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.key-id-block { min-width: 0; }
+.key-name { font-weight: 600; font-size: 15px; word-break: break-word; }
+.key-id { font-size: 13px; margin-top: 2px; letter-spacing: 1px; user-select: all; }
+
+.key-status { font-size: 12px; font-weight: 600; white-space: nowrap; padding: 4px 10px; border-radius: 999px; }
+.key-status.ok { color: var(--ok); background: rgba(62, 207, 142, 0.12); }
+.key-status.err { color: var(--err); background: rgba(255, 93, 93, 0.12); }
+
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+.key-metric { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.key-metric span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+.key-metric b { font-size: 14px; font-weight: 600; }
+
+.key-chart-wrap { height: 160px; position: relative; }
+
+.key-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn.danger { color: var(--err); border-color: var(--err); }
+.btn.danger:hover { background: rgba(255, 93, 93, 0.12); }
+
+/* --- Modal ---------------------------------------------------------------- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(5, 8, 12, 0.6);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 100%; max-width: 480px;
+  display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: cardIn 0.25s ease;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { margin: 0; font-size: 16px; }
+.modal-close { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.modal-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.field input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); padding: 9px 11px; font-size: 14px; font-family: inherit;
+}
+.field input:focus { outline: none; border-color: var(--accent); }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-err { color: var(--err); font-size: 13px; min-height: 0; display: none; }
+.field-err:not(:empty) { display: block; }
+
+.reveal { text-align: center; }
+.reveal-note { color: var(--muted); font-size: 13px; margin: 0; }
+.key-reveal {
+  background: var(--bg); border: 1px dashed var(--accent); border-radius: 8px;
+  padding: 14px; font-size: 13px; word-break: break-all; color: var(--text);
+  margin-top: 12px; user-select: all;
+}
+
 @media (max-width: 800px) {
   .topbar { flex-wrap: wrap; }
   .tabs { order: 3; width: 100%; }

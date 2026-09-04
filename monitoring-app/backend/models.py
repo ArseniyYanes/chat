@@ -1,9 +1,13 @@
 """ORM models."""
+import uuid
+from datetime import datetime, timezone
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
     Float,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -13,6 +17,15 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from database import Base
 
 TS = TIMESTAMP(timezone=True)
+
+
+def _uuid() -> str:
+    """Generate a UUIDv4 string (portable, no DB extension required)."""
+    return str(uuid.uuid4())
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class MetricSnapshot(Base):
@@ -102,3 +115,39 @@ class AdminAction(Base):
     user = Column(String(128))
     action = Column(String(128))
     details = Column(JSONB, nullable=True)
+
+
+class ApiKey(Base):
+    """A user-facing API key (only the SHA256 hash is stored)."""
+
+    __tablename__ = "api_keys"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    name = Column(String(255), nullable=False)
+    key_hash = Column(String(255), unique=True, nullable=False, index=True)
+    prefix = Column(String(20), nullable=True)         # first 6 chars, for display
+    created_at = Column(TS, default=_now)
+    last_used_at = Column(TS, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    rate_limit = Column(Integer, default=60)           # requests / minute
+    daily_token_limit = Column(Integer, default=1000000)  # tokens / day
+    total_requests = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+
+
+class ApiUsageLog(Base):
+    """One proxied vLLM request, attributed to an API key."""
+
+    __tablename__ = "api_usage_logs"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    api_key_id = Column(
+        String(36), ForeignKey("api_keys.id", ondelete="CASCADE"), index=True
+    )
+    request_time = Column(TS, index=True, default=_now)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    endpoint = Column(String(255), nullable=True)
+    status_code = Column(Integer, nullable=True)
+    ip_address = Column(String(45), nullable=True)

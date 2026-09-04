@@ -2,6 +2,7 @@ import Chart from 'chart.js/auto';
 import {
   getLatest, getHistory, getRequests, restartService, testRequest,
   getSettings, putSettings, getActions, notifyTest,
+  getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats,
   fmtBytes, fmtRate, fmtMs, fmtPct, fmtTs, fmtNum,
 } from './api.js';
 
@@ -31,6 +32,8 @@ const state = {
 };
 
 let chart = null;
+let keysCache = [];
+const keyCharts = {};
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -48,6 +51,23 @@ function toast(msg, kind = '') {
   el.className = `toast show ${kind}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.className = 'toast'; }, 4000);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { /* ignore */ }
+    ta.remove();
+    return true;
+  }
 }
 
 function row(k, v) {
@@ -409,11 +429,229 @@ function bindAdmin() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// API keys tab
+// ---------------------------------------------------------------------------
+function keyCard(k) {
+  const active = k.is_active;
+  const status = active
+    ? '<span class="key-status ok">● активен</span>'
+    : '<span class="key-status err">● заблокирован</span>';
+  const toggle = active
+    ? `<button class="btn small" data-action="block" data-id="${k.id}">Заблокировать</button>`
+    : `<button class="btn small" data-action="unblock" data-id="${k.id}">Разблокировать</button>`;
+  const masked = `${esc(k.prefix || '—')}${'•'.repeat(16)}`;
+  return `<div class="key-card${active ? '' : ' blocked'}">
+    <div class="key-card-head">
+      <div class="key-id-block">
+        <div class="key-name">${esc(k.name)}</div>
+        <div class="key-id muted mono" title="Ключ показывается один раз">${masked}</div>
+      </div>
+      ${status}
+    </div>
+    <div class="key-grid">
+      <div class="key-metric"><span>Создан</span><b>${fmtTs(k.created_at)}</b></div>
+      <div class="key-metric"><span>Последний запрос</span><b>${fmtTs(k.last_used_at)}</b></div>
+      <div class="key-metric"><span>Запросов всего</span><b>${fmtNum(k.total_requests, 0)}</b></div>
+      <div class="key-metric"><span>Токенов всего</span><b>${fmtNum(k.total_tokens, 0)}</b></div>
+      <div class="key-metric"><span>Лимит, req/мин</span><b>${fmtNum(k.rate_limit, 0)}</b></div>
+      <div class="key-metric"><span>Лимит, ток/день</span><b>${fmtNum(k.daily_token_limit, 0)}</b></div>
+    </div>
+    <div class="key-chart-wrap"><canvas id="kchart-${k.id}"></canvas></div>
+    <div class="key-actions">
+      ${toggle}
+      <button class="btn small" data-action="copy" data-id="${k.id}" title="Скопировать маскированную форму">Копировать</button>
+      <button class="btn small danger" data-action="delete" data-id="${k.id}">Удалить</button>
+    </div>
+  </div>`;
+}
+
+async function drawKeyChart(k) {
+  const cv = document.getElementById(`kchart-${k.id}`);
+  if (!cv) return;
+  try {
+    const s = await getKeyStats(k.id);
+    if (keyCharts[k.id]) { keyCharts[k.id].destroy(); keyCharts[k.id] = null; }
+    keyCharts[k.id] = new Chart(cv, {
+      type: 'bar',
+      data: {
+        labels: (s.days || []).map((d) => d.slice(5)),
+        datasets: [{
+          label: 'токены',
+          data: s.tokens || [],
+          backgroundColor: 'rgba(79, 140, 255, 0.55)',
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => ` ${fmtNum(ctx.parsed.y, 0)} токенов / ${(s.requests || [])[ctx.dataIndex] ?? 0} запросов`,
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: '#7d8a9e', maxRotation: 0 }, grid: { display: false } },
+          y: { ticks: { color: '#7d8a9e' }, grid: { color: '#252d3d' } },
+        },
+      },
+    });
+  } catch (e) {
+    /* chart is optional */
+  }
+}
+
+function renderKeys() {
+  const wrap = $('#keys-list');
+  Object.values(keyCharts).forEach((c) => { if (c) c.destroy(); });
+  keyCharts = {};
+  if (!keysCache.length) {
+    wrap.innerHTML = '<div class="muted">Ключей пока нет — сгенерируйте первый.</div>';
+    return;
+  }
+  wrap.innerHTML = keysCache.map(keyCard).join('');
+  keysCache.forEach((k) => drawKeyChart(k));
+}
+
+async function loadKeys() {
+  const wrap = $('#keys-list');
+  wrap.innerHTML = '<div class="muted">загрузка…</div>';
+  try {
+    const d = await getKeys();
+    keysCache = d.items || [];
+    renderKeys();
+  } catch (e) {
+    keysCache = [];
+    wrap.innerHTML = `<div class="muted">${esc(e.message)}</div>`;
+  }
+}
+
+function openGenerateModal() {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay';
+  ov.innerHTML = `<div class="modal">
+    <div class="modal-head"><h3>Новый API-ключ</h3><button class="modal-close" type="button">×</button></div>
+    <div class="modal-body">
+      <label class="field">Название ключа
+        <input id="nk-name" type="text" placeholder="например, dev-team" />
+      </label>
+      <div class="field-row">
+        <label class="field">Лимит, запросов/мин
+          <input id="nk-rate" type="number" value="60" min="1" />
+        </label>
+        <label class="field">Лимит, токенов/день
+          <input id="nk-tokens" type="number" value="1000000" min="1" />
+        </label>
+      </div>
+      <label class="field">Мастер-пароль
+        <input id="nk-master" type="password" placeholder="********" autocomplete="off" />
+      </label>
+      <div id="nk-err" class="field-err"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" type="button" data-close>Отмена</button>
+      <button class="btn primary" type="button" id="nk-generate">Сгенерировать</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('.modal-close').addEventListener('click', close);
+  ov.querySelector('[data-close]').addEventListener('click', close);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('#nk-generate').addEventListener('click', async () => {
+    const body = {
+      name: ov.querySelector('#nk-name').value.trim(),
+      rate_limit: Number(ov.querySelector('#nk-rate').value) || 60,
+      daily_token_limit: Number(ov.querySelector('#nk-tokens').value) || 1000000,
+      master_password: ov.querySelector('#nk-master').value,
+    };
+    const err = ov.querySelector('#nk-err');
+    if (!body.name) { err.textContent = 'Введите название ключа'; return; }
+    const btn = ov.querySelector('#nk-generate');
+    btn.disabled = true;
+    try {
+      const r = await createKey(body);
+      close();
+      openKeyReveal(r);
+      loadKeys();
+    } catch (e) {
+      err.textContent = e.message;
+      btn.disabled = false;
+    }
+  });
+}
+
+function openKeyReveal(r) {
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay';
+  ov.innerHTML = `<div class="modal reveal">
+    <div class="modal-head"><h3>Ключ создан</h3></div>
+    <div class="modal-body">
+      <p class="reveal-note">Скопируйте ключ сейчас — он хранится только как хеш и больше
+      не будет показан никому, включая вас.</p>
+      <div class="key-reveal mono">${esc(r.key)}</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary" type="button" id="rk-copy">Копировать ключ</button>
+      <button class="btn" type="button" data-close>Понятно</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('[data-close]').addEventListener('click', close);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('#rk-copy').addEventListener('click', async () => {
+    await copyText(r.key);
+    const b = ov.querySelector('#rk-copy');
+    b.textContent = 'Скопировано';
+    setTimeout(() => { b.textContent = 'Копировать ключ'; }, 1500);
+  });
+}
+
+function bindKeys() {
+  $('#keys-generate').addEventListener('click', openGenerateModal);
+  $('#keys-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const action = btn.dataset.action;
+    const item = keysCache.find((k) => k.id === id);
+    try {
+      if (action === 'copy') {
+        const masked = item ? `${item.prefix || '—'}${'•'.repeat(16)}` : id;
+        await copyText(masked);
+        toast('Скопирована маскированная форма ключа', 'ok');
+      } else if (action === 'block') {
+        await blockKey(id);
+        toast('Ключ заблокирован', 'ok');
+        loadKeys();
+      } else if (action === 'unblock') {
+        await unblockKey(id);
+        toast('Ключ разблокирован', 'ok');
+        loadKeys();
+      } else if (action === 'delete') {
+        if (!confirm(`Удалить ключ «${item ? item.name : id}»? Это необратимо.`)) return;
+        await deleteKey(id);
+        toast('Ключ удалён', 'ok');
+        loadKeys();
+      }
+    } catch (err) {
+      toast(`Ошибка: ${err.message}`, 'err');
+    }
+  });
+}
+
 function switchTab(name) {
   state.tab = name;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
   if (name === 'requests') loadRequests();
+  if (name === 'keys') loadKeys();
   if (name === 'admin') loadAdmin();
 }
 
@@ -423,6 +661,7 @@ export function init() {
   });
   bindRequests();
   bindAdmin();
+  bindKeys();
   refreshLatest();
   loadChart();
   setInterval(() => {

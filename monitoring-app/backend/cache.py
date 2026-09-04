@@ -32,6 +32,15 @@ def _get() -> Optional[redis.Redis]:
     return _client
 
 
+def client() -> Optional[redis.Redis]:
+    """Return the Redis client (or None when unavailable) for direct ops.
+
+    Rate limiting / token accounting needs raw INCR/EXPIRE, not the JSON
+    helpers. Shares the same connection and graceful-degradation logic.
+    """
+    return _get()
+
+
 def get_json(key: str) -> Optional[Any]:
     c = _get()
     if c is None:

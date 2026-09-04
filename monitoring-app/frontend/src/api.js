@@ -47,6 +47,19 @@ export const putSettings = (body) =>
 export const getActions = (limit = 50) => api(`/api/actions?limit=${limit}`);
 export const notifyTest = () => api('/api/admin/notify-test', { method: 'POST' });
 
+// --- API keys ---------------------------------------------------------------
+export const getKeys = () => api('/api/keys');
+export const createKey = (body) =>
+  api('/api/keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+export const blockKey = (id) => api(`/api/keys/${id}/block`, { method: 'POST' });
+export const unblockKey = (id) => api(`/api/keys/${id}/unblock`, { method: 'POST' });
+export const deleteKey = (id) => api(`/api/keys/${id}`, { method: 'DELETE' });
+export const getKeyStats = (id) => api(`/api/keys/${id}/stats`);
+
 // --- formatters ----------------------------------------------------------------
 
 export function fmtBytes(n) {
