@@ -612,6 +612,25 @@ def _lookup_key(raw: str):
         db.close()
 
 
+def _estimate_tokens(raw_body, completion_text=""):
+    """Rough fallback token estimate (~4 chars/token).
+
+    Used only when vLLM does not return a `usage` block (e.g. some streaming
+    setups), so the per-key accounting still reflects something meaningful.
+    """
+    try:
+        body = json.loads(raw_body) if raw_body else {}
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    msgs = body.get("messages") or []
+    prompt_chars = sum(len(m.get("content") or "") for m in msgs if isinstance(m, dict))
+    in_tok = max(1, prompt_chars // 4) if prompt_chars else 0
+    out_tok = max(1, len(completion_text) // 4) if completion_text else 0
+    return in_tok, out_tok
+
+
 @app.post("/v1/chat/completions")
 async def vllm_chat_completions(request: Request):
     """Authenticating reverse-proxy for vLLM /v1/chat/completions."""
@@ -628,10 +647,24 @@ async def vllm_chat_completions(request: Request):
 
     try:
         body = json.loads(raw_body) if raw_body else {}
+        if not isinstance(body, dict):
+            body = {}
     except Exception:
         body = {}
     stream = bool(body.get("stream"))
     url = CFG.vllm_url + "/v1/chat/completions"
+
+    # For streaming we must ask vLLM to include a final `usage` chunk,
+    # otherwise it is omitted by default and per-key token accounting
+    # would always be 0. We inject stream_options into the forwarded body.
+    fwd_body = raw_body
+    if stream and isinstance(body, dict):
+        body.setdefault("stream_options", {})["include_usage"] = True
+        try:
+            fwd_body = json.dumps(body).encode("utf-8")
+        except Exception:
+            fwd_body = raw_body
+
     fwd_headers = {
         k: v
         for k, v in request.headers.items()
@@ -642,7 +675,7 @@ async def vllm_chat_completions(request: Request):
     if not stream:
         try:
             async with httpx.AsyncClient(timeout=300) as client:
-                r = await client.post(url, content=raw_body, headers=fwd_headers)
+                r = await client.post(url, content=fwd_body, headers=fwd_headers)
         except Exception as exc:
             _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip)
             return JSONResponse(
@@ -655,6 +688,8 @@ async def vllm_chat_completions(request: Request):
             out_t = int(usage.get("completion_tokens") or 0)
         except Exception:
             pass
+        if in_t == 0 and out_t == 0:
+            in_t, out_t = _estimate_tokens(raw_body)
         _record_usage(key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip)
         return Response(
             content=r.content,
@@ -665,13 +700,17 @@ async def vllm_chat_completions(request: Request):
     async def gen():
         in_t = out_t = 0
         status = 200
+        completion = []
         try:
             async with httpx.AsyncClient(timeout=300) as client:
-                async with client.stream("POST", url, content=raw_body, headers=fwd_headers) as resp:
+                async with client.stream(
+                    "POST", url, content=fwd_body, headers=fwd_headers
+                ) as resp:
                     status = resp.status_code
                     async for chunk in resp.aiter_bytes():
                         yield chunk
-                        for line in chunk.decode("utf-8", "ignore").split("\n"):
+                        text = chunk.decode("utf-8", "ignore")
+                        for line in text.split("\n"):
                             line = line.strip()
                             if not line.startswith("data:"):
                                 continue
@@ -679,13 +718,21 @@ async def vllm_chat_completions(request: Request):
                             if payload in ("", "[DONE]"):
                                 continue
                             try:
-                                usage = json.loads(payload).get("usage")
+                                obj = json.loads(payload)
                             except Exception:
                                 continue
+                            usage = obj.get("usage")
                             if usage:
                                 in_t = int(usage.get("prompt_tokens") or 0)
                                 out_t = int(usage.get("completion_tokens") or 0)
+                            for choice in obj.get("choices") or []:
+                                delta = choice.get("delta") or {}
+                                piece = delta.get("content")
+                                if piece:
+                                    completion.append(piece)
         finally:
+            if in_t == 0 and out_t == 0:
+                in_t, out_t = _estimate_tokens(raw_body, "".join(completion))
             _record_usage(key_id, status, in_t, out_t, "/v1/chat/completions", client_ip)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
