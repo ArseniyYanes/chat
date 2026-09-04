@@ -33,7 +33,7 @@ const state = {
 
 let chart = null;
 let keysCache = [];
-const keyCharts = {};
+let keyCharts = {};
 
 const $ = (sel) => document.querySelector(sel);
 
