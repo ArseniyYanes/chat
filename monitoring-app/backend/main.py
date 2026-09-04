@@ -786,6 +786,27 @@ def _estimate_tokens(raw_body, completion_text=""):
     return in_tok, out_tok
 
 
+def _extract_usage(usage: dict):
+    """Derive per-request (input_tokens, output_tokens) from a vLLM ``usage``.
+
+    Chat clients resend the WHOLE conversation on every request, so
+    ``prompt_tokens`` is the size of the full prompt/context, not the new
+    user message.  When vLLM's automatic prefix cache is enabled (default in
+    recent vLLM versions) it reports the prompt portion served from the cache
+    in ``prompt_tokens_details.cached_tokens``; counting only the uncached
+    part makes per-request "in" reflect the *new* input tokens, so per-key
+    totals stay in line with real consumption instead of the cumulative
+    context size.
+    """
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    try:
+        cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    except Exception:
+        cached = 0
+    return max(0, prompt - cached), completion
+
+
 @app.post("/v1/chat/completions")
 async def vllm_chat_completions(request: Request):
     """Authenticating reverse-proxy for vLLM /v1/chat/completions."""
@@ -845,8 +866,7 @@ async def vllm_chat_completions(request: Request):
         in_t = out_t = 0
         try:
             usage = r.json().get("usage") or {}
-            in_t = int(usage.get("prompt_tokens") or 0)
-            out_t = int(usage.get("completion_tokens") or 0)
+            in_t, out_t = _extract_usage(usage)
         except Exception:
             pass
         if in_t == 0 and out_t == 0:
@@ -887,8 +907,7 @@ async def vllm_chat_completions(request: Request):
                                 continue
                             usage = obj.get("usage")
                             if usage:
-                                in_t = int(usage.get("prompt_tokens") or 0)
-                                out_t = int(usage.get("completion_tokens") or 0)
+                                in_t, out_t = _extract_usage(usage)
                             for choice in obj.get("choices") or []:
                                 delta = choice.get("delta") or {}
                                 piece = delta.get("content")

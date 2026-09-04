@@ -170,7 +170,11 @@ admin/admin), кроме `/api/health`. `/v1/*` — Bearer API-ключ (SHA256 
    │    httpx POST {VLLM_API_URL}/v1/chat/completions
    │    headers: без Authorization клиента; если VLLM_API_KEY задан,
    │             подставляем "Authorization: Bearer {VLLM_API_KEY}"
-   │    in/out = response.usage.{prompt,completion}_tokens
+   │    in/out = _extract_usage(response.usage):
+    │             in  = prompt_tokens − cached_tokens  # только НОВОЕ в промпте
+    │                  (cached_tokens = usage.prompt_tokens_details.cached_tokens,
+    │                   prefix-кэш vLLM; если отсутствует → in = prompt_tokens)
+    │             out = completion_tokens
    │    fallback _estimate_tokens() ≈ len(текст)/4, если usage пуст
    │    → _record_usage (§6.1); вернуть ответ vLLM как есть (статус, body, content-type)
    │    vLLM недоступен → 502 {"error":{"message":"vLLM unreachable: …"}} (usage пишется)
@@ -180,7 +184,8 @@ admin/admin), кроме `/api/health`. `/v1/*` — Bearer API-ключ (SHA256 
         #   → токены всегда 0. Это ключевая деталь для учёта.
         StreamingResponse: httpx.stream → по байтам yield клиенту;
         параллельно парсинг SSE-строк "data:…":
-           - "usage" в чанке (финальный чанк благодаря include_usage) → точные in/out
+           - "usage" в чанке (финальный чанк благодаря include_usage) → точные
+             in/out тем же _extract_usage, что и в non-stream
            - choices[].delta.content → сборка completion (для fallback-оценки)
         finally: если in==0 и out==0 → _estimate_tokens(prompt, completion)
         → _record_usage (§6.1)
@@ -196,6 +201,17 @@ admin/admin), кроме `/api/health`. `/v1/*` — Bearer API-ключ (SHA256 
 ```
 
 Формат ключа: `sk-` + 48 hex (`secrets.token_hex(24)`). В БД — только SHA256.
+
+**Семантика «in» (input tokens).** Чат-клиенты шлют ВЕСЬ диалог с каждым
+запросом, поэтому сырой `prompt_tokens` — размер всего контекста (растёт с
+каждым ответом модели), и суммы по ключам визуально «раздуваются»
+(сотни тысяч токенов за несколько минут). Поэтому «in» =
+`prompt_tokens − cached_tokens`: только новая (не кэшированная) часть
+промпта. `cached_tokens` отдаёт vLLM в `prompt_tokens_details`, если у него
+включён automatic prefix cache (по умолчанию включён в актуальных версиях).
+Если vLLM запущен без `--enable-prefix-caching`, `cached_tokens`
+отсутствует/равен 0, и «in» остаётся полным `prompt_tokens` — это честный
+объём обработанного промпта.
 
 ### Безопасность (2 уровня)
 1. **Gateway-уровень**: проверка клиентского API-ключа + лимиты (выше).
