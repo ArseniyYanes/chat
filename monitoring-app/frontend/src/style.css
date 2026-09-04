@@ -221,6 +221,11 @@ label.check { flex-direction: row; align-items: center; }
 
 .key-chart-wrap { height: 160px; position: relative; }
 
+.key-usage-head { margin-top: 14px; font-size: 12px; letter-spacing: .3px; text-transform: uppercase; }
+.key-usage { max-height: 260px; overflow-y: auto; margin-top: 8px; }
+.usage-tbl { font-size: 12px; }
+.usage-tbl th, .usage-tbl td { padding: 5px 8px; }
+
 .key-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn.danger { color: var(--err); border-color: var(--err); }
 .btn.danger:hover { background: rgba(255, 93, 93, 0.12); }

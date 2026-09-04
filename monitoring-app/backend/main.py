@@ -494,6 +494,16 @@ def _record_usage(key_id, status_code, input_tokens, output_tokens, endpoint, ip
             db.close()
     except Exception as exc:  # never let bookkeeping break the request
         log.warning("api-key usage bookkeeping failed: %s", exc)
+    log.info(
+        "vllm-proxy usage: key=%s %s status=%s in=%s out=%s total=%s ip=%s",
+        key_id,
+        endpoint,
+        status_code,
+        input_tokens or 0,
+        output_tokens or 0,
+        total,
+        ip,
+    )
     apiproxy.record_tokens(key_id, total)
 
 
@@ -592,6 +602,39 @@ def key_stats(key_id: str, user: str = Depends(require_auth), db=Depends(get_ses
         tokens.append(used[0])
         requests.append(used[1])
     return {"days": labels, "tokens": tokens, "requests": requests}
+
+
+@app.get("/api/keys/{key_id}/usage")
+def key_usage(
+    key_id: str,
+    limit: int = Query(default=50, le=200, ge=1),
+    user: str = Depends(require_auth),
+    db=Depends(get_session),
+):
+    """Most recent per-request usage logs for a key (newest first)."""
+    if not db.get(ApiKey, key_id):
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    rows = (
+        db.execute(
+            select(ApiUsageLog)
+            .where(ApiUsageLog.api_key_id == key_id)
+            .order_by(ApiUsageLog.request_time.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return {
+        "items": [
+            {
+                "request_time": r.request_time.isoformat() if r.request_time else None,
+                "input_tokens": r.input_tokens or 0,
+                "output_tokens": r.output_tokens or 0,
+                "total_tokens": r.total_tokens or 0,
+                "status_code": r.status_code,
+                "ip_address": r.ip_address,
+            }
+            for r in rows
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------

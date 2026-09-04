@@ -2,7 +2,7 @@ import Chart from 'chart.js/auto';
 import {
   getLatest, getHistory, getRequests, restartService, testRequest,
   getSettings, putSettings, getActions, notifyTest,
-  getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats,
+  getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats, getKeyUsage,
   fmtBytes, fmtRate, fmtMs, fmtPct, fmtTs, fmtNum,
 } from './api.js';
 
@@ -458,6 +458,8 @@ function keyCard(k) {
       <div class="key-metric"><span>Лимит, ток/день</span><b>${fmtNum(k.daily_token_limit, 0)}</b></div>
     </div>
     <div class="key-chart-wrap"><canvas id="kchart-${k.id}"></canvas></div>
+    <div class="key-usage-head muted">История запросов (последние 30)</div>
+    <div id="kusage-${k.id}" class="key-usage">загрузка…</div>
     <div class="key-actions">
       ${toggle}
       <button class="btn small" data-action="copy" data-id="${k.id}" title="Скопировать маскированную форму">Копировать</button>
@@ -506,6 +508,33 @@ async function drawKeyChart(k) {
   }
 }
 
+async function drawKeyUsage(k) {
+  const box = document.getElementById(`kusage-${k.id}`);
+  if (!box) return;
+  try {
+    const s = await getKeyUsage(k.id, 30);
+    const items = s.items || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="muted">Запросов пока нет.</div>';
+      return;
+    }
+    box.innerHTML = `<table class="table usage-tbl"><thead><tr>
+      <th>Время</th><th>in</th><th>out</th><th>всего</th><th>статус</th><th>IP</th>
+    </tr></thead><tbody>` +
+      items.map((r) => `<tr>
+      <td>${fmtTs(r.request_time)}</td>
+      <td>${fmtNum(r.input_tokens, 0)}</td>
+      <td>${fmtNum(r.output_tokens, 0)}</td>
+      <td>${fmtNum(r.total_tokens, 0)}</td>
+      <td><span class="badge ${r.status_code < 400 ? 'ok' : 'err'}">${r.status_code ?? '—'}</span></td>
+      <td class="mono muted">${esc(r.ip_address || '—')}</td>
+    </tr>`).join('') +
+      '</tbody></table>';
+  } catch (e) {
+    box.innerHTML = `<div class="muted">нет данных (${esc(e.message)})</div>`;
+  }
+}
+
 function renderKeys() {
   const wrap = $('#keys-list');
   Object.values(keyCharts).forEach((c) => { if (c) c.destroy(); });
@@ -515,7 +544,7 @@ function renderKeys() {
     return;
   }
   wrap.innerHTML = keysCache.map(keyCard).join('');
-  keysCache.forEach((k) => drawKeyChart(k));
+  keysCache.forEach((k) => { drawKeyChart(k); drawKeyUsage(k); });
 }
 
 async function loadKeys() {

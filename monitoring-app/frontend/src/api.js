@@ -59,6 +59,7 @@ export const blockKey = (id) => api(`/api/keys/${id}/block`, { method: 'POST' })
 export const unblockKey = (id) => api(`/api/keys/${id}/unblock`, { method: 'POST' });
 export const deleteKey = (id) => api(`/api/keys/${id}`, { method: 'DELETE' });
 export const getKeyStats = (id) => api(`/api/keys/${id}/stats`);
+export const getKeyUsage = (id, limit = 30) => api(`/api/keys/${id}/usage?limit=${limit}`);
 
 // --- formatters ----------------------------------------------------------------
 
