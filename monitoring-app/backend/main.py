@@ -424,6 +424,44 @@ def update_settings(payload: dict, user: str = Depends(require_auth), db=Depends
     log_action(db, user, "settings.update", updated)
     return get_settings(db)
 
+@app.get("/v1/keys/check")
+async def check_key(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing API key")
+
+    # Извлекаем ключ из "Bearer sk-..."
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    api_key = parts[1]
+
+    # Проверяем ключ в базе
+    key_record = db.query(ApiKey).filter(
+        ApiKey.key == api_key,
+        ApiKey.is_active == True
+    ).first()
+
+    if not key_record:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Проверяем лимиты (если есть)
+    if key_record.daily_limit and key_record.used_today >= key_record.daily_limit:
+        raise HTTPException(status_code=429, detail="Daily token limit exceeded")
+
+    # Проверяем срок действия
+    if key_record.expires_at and key_record.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="API key expired")
+
+    return {
+        "valid": True,
+        "key_id": key_record.id,
+        "rate_limit": key_record.daily_limit,
+        "used_today": key_record.used_today,
+        "expires_at": key_record.expires_at
+    }
 
 @app.get("/api/actions")
 def actions(limit: int = Query(50, le=500), db=Depends(get_session)):
