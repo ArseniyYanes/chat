@@ -20,7 +20,7 @@ from auth import require_auth
 from collector import _dig, run_forever
 from config import CFG
 import database
-from database import SessionLocal, init_db
+from database import SessionLocal, init_db, get_db
 from models import (
     AdminAction,
     ApiKey,

@@ -54,3 +54,11 @@ def init_db() -> None:
     except Exception as exc:  # plain PostgreSQL — still fine
         TIMESCALE = False
         log.warning("TimescaleDB not available (%s); using plain tables", exc)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
