@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from sqlalchemy import Date, case, func, select, text
+from sqlalchemy.orm import Session
 
 import apiproxy
 import cache
