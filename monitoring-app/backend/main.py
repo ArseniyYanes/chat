@@ -32,6 +32,7 @@ from models import (
     ServiceStatus,
     Setting,
 )
+from apiproxy import hash_key
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("monitoring.api")
@@ -441,7 +442,7 @@ async def check_key(
 
     # Проверяем ключ в базе
     key_record = db.query(ApiKey).filter(
-        ApiKey.key == api_key,
+        ApiKey.key_hash == hash_key(api_key),
         ApiKey.is_active == True
     ).first()
 
