@@ -1,5 +1,6 @@
 """FastAPI application: monitoring API + static frontend serving."""
 import asyncio
+import collections
 import hmac
 import json
 import logging
@@ -78,10 +79,12 @@ RANGE_MAP = {
 async def lifespan(app: FastAPI):
     global collector_task
     init_db()
+    load_task = asyncio.create_task(_load_history_loop())
     if CFG.run_collector:
         collector_task = asyncio.create_task(run_forever())
         log.info("in-process collector started")
     yield
+    load_task.cancel()
     if collector_task:
         collector_task.cancel()
         try:
@@ -216,16 +219,34 @@ def history(
     tz_min: int = Query(0, ge=-840, le=840, alias="tz"),
     db=Depends(get_session),
 ):
-    key = f"history:{metric}:{range_key}:{tz_min}"
+    key = f"history:{metric}:{range_key}:{tz_min}:v2"
     cached = cache.get_json(key)
     if cached:
         return cached
-    hours, _points = RANGE_MAP.get(range_key, (24, 120))
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    hours, points = RANGE_MAP.get(range_key, (24, 120))
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
     # Client-side timezone offset in minutes (UTC -> local), e.g. +180 for UTC+3.
     tz = timezone(timedelta(minutes=tz_min))
-    labels = []
-    values = []
+    # Uniform bucket grid covering the FULL selected window: periods without
+    # data (collector/vLLM was down) stay visible as gaps instead of the
+    # chart silently compressing to the existing data span.
+    n = points
+    bucket_s = hours * 3600 / n
+    labels = [
+        (since + timedelta(seconds=round(i * bucket_s))).astimezone(tz).strftime(
+            "%H:%M" if hours <= 24 else "%m-%d %H:%M"
+        )
+        for i in range(n)
+    ]
+    sums = [0.0] * n
+    cnts = [0] * n
+
+    def _put(idx: int, value):
+        if 0 <= idx < n:
+            sums[idx] += value
+            cnts[idx] += 1
+
     if range_key in ("7d", "30d") and metric in METRIC_FIELD:
         rows = (
             db.execute(
@@ -237,9 +258,11 @@ def history(
             .all()
         )
         for r in rows:
-            labels.append(r.hour_bucket.astimezone(tz).strftime("%m-%d %H:%M"))
-            values.append(getattr(r, METRIC_FIELD[metric], None))
-    if not labels:
+            v = getattr(r, METRIC_FIELD[metric], None)
+            if v is None:
+                continue
+            _put(int((r.hour_bucket - since).total_seconds() // bucket_s), v)
+    else:
         rows = (
             db.execute(
                 select(MetricSnapshot)
@@ -249,13 +272,12 @@ def history(
             .scalars()
             .all()
         )
-        if len(rows) > 360:
-            step = len(rows) / 360
-            rows = [rows[int(i * step)] for i in range(360)]
-        fmt = "%H:%M" if hours <= 24 else "%m-%d %H:%M"
         for r in rows:
-            labels.append(r.ts.astimezone(tz).strftime(fmt))
-            values.append(_extract_metric(r, metric))
+            v = _extract_metric(r, metric)
+            if v is None:
+                continue
+            _put(int((r.ts - since).total_seconds() // bucket_s), v)
+    values = [round(sums[i] / cnts[i], 2) if cnts[i] else None for i in range(n)]
     data = {"metric": metric, "range": range_key, "labels": labels, "values": values}
     cache.set_json(key, data, 120)
     return data
@@ -899,6 +921,42 @@ class GatewayLoad:
 GATEWAY = GatewayLoad()
 
 
+class LoadHistory:
+    """In-memory ring buffer of gateway load samples.
+
+    A background task records one sample per ``interval`` seconds (active /
+    queued / tps totals); the buffer keeps the last hour.  Used by the
+    «Нагрузка» tab chart.  Lost on restart — that is fine for a live view.
+    """
+
+    def __init__(self, interval: int = 10, span_s: int = 3600):
+        self.interval = interval
+        self._samples = collections.deque(maxlen=max(1, span_s // interval))
+
+    def record(self, active: int, queued: int, tps: float):
+        self._samples.append((time.time(), active, queued, tps))
+
+    def series(self):
+        return [
+            {"t": int(ts * 1000), "active": a, "queued": q, "tps": s}
+            for ts, a, q, s in self._samples
+        ]
+
+
+LOAD_HISTORY = LoadHistory()
+
+
+async def _load_history_loop():
+    """Sample the live gateway load every 10s into LOAD_HISTORY."""
+    while True:
+        try:
+            t = GATEWAY.snapshot()["totals"]
+            LOAD_HISTORY.record(t["active"], t["queued"], t["tps"])
+        except Exception as e:  # pragma: no cover - never kill the loop
+            log.warning("load history sample failed: %s", e)
+        await asyncio.sleep(10)
+
+
 class GatewayQueueTimeout(Exception):
     """A request could not get a concurrency slot within gw_queue_timeout."""
 
@@ -958,6 +1016,12 @@ def keys_live(user: str = Depends(require_auth), db=Depends(get_db)):
     rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
     snap["keys"] = rows
     return snap
+
+
+@app.get("/api/keys/live/history")
+def keys_live_history(user: str = Depends(require_auth)):
+    """Recent gateway load samples (10s cadence) for the load chart."""
+    return {"samples": LOAD_HISTORY.series(), "interval_s": LOAD_HISTORY.interval}
 
 
 def _bearer_key(request: Request) -> str:

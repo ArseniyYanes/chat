@@ -62,6 +62,7 @@ export const getKeyStats = (id) => api(`/api/keys/${id}/stats`);
 export const getKeyUsage = (id, limit = 30) => api(`/api/keys/${id}/usage?limit=${limit}`);
 export const getKeysSummary = () => api('/api/keys/summary');
 export const getKeysLive = () => api('/api/keys/live');
+export const getKeysLiveHistory = () => api('/api/keys/live/history');
 
 // --- formatters ----------------------------------------------------------------
 

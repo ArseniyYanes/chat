@@ -3,7 +3,7 @@ import {
   getLatest, getHistory, getRequests, restartService, testRequest,
   getSettings, putSettings, getActions, notifyTest,
   getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats, getKeyUsage, getKeysSummary,
-  getKeysLive,
+  getKeysLive, getKeysLiveHistory,
   fmtBytes, fmtRate, fmtMs, fmtPct, fmtTs, fmtNum,
 } from './api.js';
 
@@ -33,6 +33,7 @@ const state = {
 };
 
 let chart = null;
+let liveChart = null;
 let keysCache = [];
 let keyCharts = {};
 let summaryChart = null;
@@ -264,7 +265,7 @@ async function loadChart() {
         pointRadius: 0,
         borderWidth: 2,
         tension: 0.25,
-        spanGaps: true,
+        spanGaps: false, // gaps = periods without data (collector was down)
       },
     ];
     chart.update();
@@ -752,6 +753,76 @@ function bindKeys() {
 
 // --- Gateway live load ------------------------------------------------------
 
+async function loadLiveHistory() {
+  const cv = $('#load-chart');
+  if (!cv) return;
+  let d;
+  try {
+    d = await getKeysLiveHistory();
+  } catch (err) {
+    return; // silent: chart just keeps the previous data
+  }
+  const samples = d.samples || [];
+  if (!liveChart) {
+    liveChart = new Chart(cv, {
+      type: 'bar',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'Активные',
+            data: [],
+            backgroundColor: 'rgba(62, 207, 142, 0.75)',
+            stack: 'load',
+            borderWidth: 0,
+          },
+          {
+            label: 'В очереди',
+            data: [],
+            backgroundColor: 'rgba(245, 166, 35, 0.75)',
+            stack: 'load',
+            borderWidth: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#7d8a9e' } },
+          tooltip: {
+            callbacks: {
+              title: (items) => (items[0]
+                ? new Date(samples[items[0].dataIndex].t).toLocaleTimeString()
+                : ''),
+            },
+          },
+        },
+        scales: {
+          x: {
+            stacked: true,
+            ticks: { color: '#7d8a9e', maxTicksLimit: 10 },
+            grid: { color: '#252d3d' },
+          },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            ticks: { color: '#7d8a9e', precision: 0 },
+            grid: { color: '#252d3d' },
+          },
+        },
+      },
+    });
+  }
+  liveChart.data.labels = samples.map((s) =>
+    new Date(s.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }));
+  liveChart.data.datasets[0].data = samples.map((s) => s.active);
+  liveChart.data.datasets[1].data = samples.map((s) => s.queued);
+  liveChart.update();
+}
+
 async function loadLive() {
   let d;
   try {
@@ -775,6 +846,7 @@ async function loadLive() {
   });
   $('#load-table tbody').innerHTML =
     rows.join('') || '<tr><td colspan="5" class="muted">Нет ключей</td></tr>';
+  loadLiveHistory();
 }
 
 function switchTab(name) {

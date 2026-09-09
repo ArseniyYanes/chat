@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Monitoring</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <script type="module" crossorigin src="./assets/index-ChL9SFnM.js"></script>
+    <script type="module" crossorigin src="./assets/index-DDSAGQxL.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-Cenwht7Y.css">
   </head>
   <body>
@@ -125,6 +125,9 @@
               <div class="sum-tile"><span>Ключей онлайн</span><b id="lv-online">—</b></div>
               <div class="sum-tile"><span>Скорость выдачи</span><b id="lv-tps">—</b></div>
             </div>
+          </div>
+          <div class="chart-wrap" title="Две полосы: зелёная — активные запросы к vLLM, оранжевая — ждущие в очереди (последний час, шаг 10 с)">
+            <canvas id="load-chart"></canvas>
           </div>
           <table class="table" id="load-table">
             <thead>
