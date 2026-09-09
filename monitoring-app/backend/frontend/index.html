@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Monitoring</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <script type="module" crossorigin src="./assets/index-CBtrZFmB.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-C0JqXTyv.css">
+    <script type="module" crossorigin src="./assets/index-ChL9SFnM.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Cenwht7Y.css">
   </head>
   <body>
     <header class="topbar">
@@ -18,6 +18,7 @@
       <nav class="tabs">
         <button class="tab active" data-tab="dashboard">Дашборд</button>
         <button class="tab" data-tab="requests">Запросы</button>
+        <button class="tab" data-tab="load">Нагрузка</button>
         <button class="tab" data-tab="keys">API-ключи</button>
         <button class="tab" data-tab="admin">Админка</button>
       </nav>
@@ -103,6 +104,37 @@
             </div>
             <div id="t-result" class="muted"></div>
           </div>
+        </div>
+      </section>
+
+      <section id="tab-load" class="tabpane">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Нагрузка шлюза</h2>
+            <span id="load-updated" class="muted">—</span>
+          </div>
+          <p class="muted key-hint">
+            Живая диагностика шлюза: активные запросы к vLLM, параллельные агенты
+            на ключ и текущая скорость выдачи. Обновляется каждые 3 с.
+            Лимиты: <b id="load-limits">—</b>
+          </p>
+          <div class="keys-summary">
+            <div class="sum-grid">
+              <div class="sum-tile"><span>Активных запросов</span><b id="lv-active">—</b></div>
+              <div class="sum-tile"><span>Ждут в очереди</span><b id="lv-queued">—</b></div>
+              <div class="sum-tile"><span>Ключей онлайн</span><b id="lv-online">—</b></div>
+              <div class="sum-tile"><span>Скорость выдачи</span><b id="lv-tps">—</b></div>
+            </div>
+          </div>
+          <table class="table" id="load-table">
+            <thead>
+              <tr>
+                <th>Ключ</th><th>Активные</th><th>Стримы</th>
+                <th>Очередь</th><th>Скорость (ток/с)</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </div>
       </section>
 

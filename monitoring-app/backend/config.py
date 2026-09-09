@@ -23,6 +23,14 @@ class Config:
     # only reach the model through this gateway (which enforces per-client keys).
     vllm_api_key: str = os.getenv("VLLM_API_KEY", "")
 
+    # Gateway concurrency / queue (see GatewayLoad in main.py).
+    # How many parallel requests one API key (user) may have at the same time
+    # (e.g. several parallel agents), how many across all keys, and how long
+    # an excess request may wait in the queue before it gets a 503.
+    gw_per_key_concurrency: int = int(os.getenv("GW_PER_KEY_CONCURRENCY", "4"))
+    gw_global_concurrency: int = int(os.getenv("GW_GLOBAL_CONCURRENCY", "16"))
+    gw_queue_timeout: float = float(os.getenv("GW_QUEUE_TIMEOUT", "30"))
+
     # Collector
     collect_interval: float = float(os.getenv("COLLECT_INTERVAL", "10"))
     prompt_retention_days: int = int(os.getenv("PROMPT_RETENTION_DAYS", "7"))

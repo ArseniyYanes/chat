@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -792,6 +793,173 @@ def keys_summary(
 # ---------------------------------------------------------------------------
 # vLLM proxy with API-key authentication
 # ---------------------------------------------------------------------------
+class GatewayLoad:
+    """Live (in-process) view of gateway load.
+
+    Tracks per API key: how many requests are currently running against vLLM
+    ("active"), how many wait in the concurrency queue ("queued") and the
+    current output speed in tokens/sec, measured on live SSE streams
+    (one non-empty content delta ~ one token).  The gateway is a single
+    uvicorn process, so a plain dict guarded by a lock is enough — no Redis
+    round-trip per token.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stats = {}    # key_id -> {"active", "queued", "streams": [{"t0", "deltas"}]}
+        self._key_sems = {}  # key_id -> asyncio.Semaphore
+        self.global_sem = asyncio.Semaphore(CFG.gw_global_concurrency)
+
+    def per_key_sem(self, key_id: str) -> "asyncio.Semaphore":
+        with self._lock:
+            sem = self._key_sems.get(key_id)
+            if sem is None:
+                sem = asyncio.Semaphore(CFG.gw_per_key_concurrency)
+                self._key_sems[key_id] = sem
+            return sem
+
+    def _stat(self, key_id: str) -> dict:
+        # Must be called with self._lock held.
+        return self._stats.setdefault(key_id, {"active": 0, "queued": 0, "streams": []})
+
+    def queued_inc(self, key_id):
+        with self._lock:
+            self._stat(key_id)["queued"] += 1
+
+    def queued_dec(self, key_id):
+        with self._lock:
+            st = self._stats.get(key_id)
+            if st and st["queued"] > 0:
+                st["queued"] -= 1
+
+    def active_inc(self, key_id):
+        with self._lock:
+            self._stat(key_id)["active"] += 1
+
+    def active_dec(self, key_id):
+        with self._lock:
+            st = self._stats.get(key_id)
+            if st and st["active"] > 0:
+                st["active"] -= 1
+
+    def stream_start(self, key_id):
+        with self._lock:
+            self._stat(key_id)["streams"].append({"t0": None, "deltas": 0})
+
+    def stream_delta(self, key_id):
+        with self._lock:
+            streams = self._stat(key_id)["streams"]
+            if streams:
+                s = streams[-1]
+                s["deltas"] += 1
+                if s["t0"] is None:
+                    s["t0"] = time.monotonic()
+
+    def stream_stop(self, key_id):
+        with self._lock:
+            streams = self._stats.get(key_id, {}).get("streams", [])
+            if streams:
+                streams.pop()
+
+    def snapshot(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            rows = []
+            for key_id, st in self._stats.items():
+                tps = 0.0
+                for s in st["streams"]:
+                    if s["t0"] is not None:
+                        elapsed = now - s["t0"]
+                        if elapsed >= 0.5:
+                            tps += s["deltas"] / elapsed
+                rows.append({
+                    "key_id": key_id,
+                    "active": st["active"],
+                    "queued": st["queued"],
+                    "streams": len(st["streams"]),
+                    "tps": round(tps, 1),
+                })
+        rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
+        return {
+            "limits": {
+                "per_key": CFG.gw_per_key_concurrency,
+                "global": CFG.gw_global_concurrency,
+                "queue_timeout_s": CFG.gw_queue_timeout,
+            },
+            "totals": {
+                "active": sum(r["active"] for r in rows),
+                "queued": sum(r["queued"] for r in rows),
+                "keys_online": sum(1 for r in rows if r["active"] or r["queued"]),
+                "tps": round(sum(r["tps"] for r in rows), 1),
+            },
+            "keys": rows,
+        }
+
+
+GATEWAY = GatewayLoad()
+
+
+class GatewayQueueTimeout(Exception):
+    """A request could not get a concurrency slot within gw_queue_timeout."""
+
+    def __init__(self, scope: str, waited: float):
+        self.scope = scope  # "key" | "global"
+        self.waited = waited
+
+
+async def _acquire_slot(key_id: str) -> "asyncio.Semaphore":
+    """Queue the request until a concurrency slot is free.
+
+    Raises GatewayQueueTimeout if the wait exceeds CFG.gw_queue_timeout.
+    The caller MUST call _release_slot() exactly once (in a finally).
+    """
+    t0 = time.monotonic()
+    GATEWAY.queued_inc(key_id)
+    key_sem = GATEWAY.per_key_sem(key_id)
+    try:
+        try:
+            await asyncio.wait_for(key_sem.acquire(), timeout=CFG.gw_queue_timeout)
+        except asyncio.TimeoutError:
+            raise GatewayQueueTimeout("key", time.monotonic() - t0)
+        try:
+            await asyncio.wait_for(GATEWAY.global_sem.acquire(), timeout=CFG.gw_queue_timeout)
+        except asyncio.TimeoutError:
+            key_sem.release()
+            raise GatewayQueueTimeout("global", time.monotonic() - t0)
+    finally:
+        GATEWAY.queued_dec(key_id)
+    GATEWAY.active_inc(key_id)
+    return key_sem
+
+
+def _release_slot(key_id: str, key_sem: "asyncio.Semaphore"):
+    GATEWAY.active_dec(key_id)
+    GATEWAY.global_sem.release()
+    key_sem.release()
+
+
+@app.get("/api/keys/live")
+def keys_live(user: str = Depends(require_auth), db=Depends(get_db)):
+    """Live load snapshot: active/queued requests per key + current output speed."""
+    snap = GATEWAY.snapshot()
+    live = {r["key_id"]: r for r in snap["keys"]}
+    rows = []
+    for k in db.execute(select(ApiKey).order_by(ApiKey.created_at.desc())).scalars().all():
+        l = live.get(k.id, {})
+        rows.append({
+            "key_id": k.id,
+            "name": k.name,
+            "blocked": not k.is_active,
+            "active": l.get("active", 0),
+            "queued": l.get("queued", 0),
+            "streams": l.get("streams", 0),
+            "tps": l.get("tps", 0.0),
+        })
+    rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
+    snap["keys"] = rows
+    return snap
+
+
 def _bearer_key(request: Request) -> str:
     auth = request.headers.get("authorization", "")
     return auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
@@ -847,6 +1015,37 @@ def _extract_usage(usage: dict):
     return max(0, prompt - cached), completion
 
 
+async def _vllm_nonstream(url, fwd_body, fwd_headers, raw_body, key_id, client_ip):
+    """Run a non-streaming vLLM call, record usage, and return a Response."""
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(url, content=fwd_body, headers=fwd_headers)
+    except Exception as exc:
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip, latency_ms)
+        return JSONResponse(
+            status_code=502, content={"error": {"message": f"vLLM unreachable: {exc}"}}
+        )
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    in_t = out_t = 0
+    try:
+        usage = r.json().get("usage") or {}
+        in_t, out_t = _extract_usage(usage)
+    except Exception:
+        pass
+    if in_t == 0 and out_t == 0:
+        in_t, out_t = _estimate_tokens(raw_body)
+    _record_usage(
+        key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
+    )
+    return Response(
+        content=r.content,
+        status_code=r.status_code,
+        media_type=r.headers.get("content-type", "application/json"),
+    )
+
+
 @app.post("/v1/chat/completions")
 async def vllm_chat_completions(request: Request):
     """Authenticating reverse-proxy for vLLM /v1/chat/completions."""
@@ -860,6 +1059,27 @@ async def vllm_chat_completions(request: Request):
     if not apiproxy.check_daily_tokens(key.id, key.daily_token_limit):
         return JSONResponse(status_code=429, content={"error": {"message": "Daily token limit exceeded"}})
     key_id = key.id
+
+    # Concurrency limits + real queue (see GatewayLoad).  The slot is held for
+    # the whole vLLM call, including stream generation (released in the
+    # generator's finally for streaming requests).
+    try:
+        key_sem = await _acquire_slot(key_id)
+    except GatewayQueueTimeout as qt:
+        limit = (
+            CFG.gw_per_key_concurrency if qt.scope == "key" else CFG.gw_global_concurrency
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "message": (
+                        f"Gateway is busy: waited {qt.waited:.0f}s in queue "
+                        f"(limit {limit} parallel requests). Retry in a few seconds."
+                    )
+                }
+            },
+        )
 
     try:
         body = json.loads(raw_body) if raw_body else {}
@@ -892,39 +1112,18 @@ async def vllm_chat_completions(request: Request):
         fwd_headers["authorization"] = f"Bearer {CFG.vllm_api_key}"
 
     if not stream:
-        t0 = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=300) as client:
-                r = await client.post(url, content=fwd_body, headers=fwd_headers)
-        except Exception as exc:
-            latency_ms = round((time.monotonic() - t0) * 1000)
-            _record_usage(key_id, 502, 0, 0, "/v1/chat/completions", client_ip, latency_ms)
-            return JSONResponse(
-                status_code=502, content={"error": {"message": f"vLLM unreachable: {exc}"}}
-            )
-        latency_ms = round((time.monotonic() - t0) * 1000)
-        in_t = out_t = 0
-        try:
-            usage = r.json().get("usage") or {}
-            in_t, out_t = _extract_usage(usage)
-        except Exception:
-            pass
-        if in_t == 0 and out_t == 0:
-            in_t, out_t = _estimate_tokens(raw_body)
-        _record_usage(
-            key_id, r.status_code, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
+        response = await _vllm_nonstream(
+            url, fwd_body, fwd_headers, raw_body, key_id, client_ip
         )
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type", "application/json"),
-        )
+        _release_slot(key_id, key_sem)
+        return response
 
     async def gen():
         in_t = out_t = 0
         status = 200
         completion = []
         t0 = time.monotonic()
+        GATEWAY.stream_start(key_id)
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 async with client.stream(
@@ -953,13 +1152,16 @@ async def vllm_chat_completions(request: Request):
                                 piece = delta.get("content")
                                 if piece:
                                     completion.append(piece)
+                                    GATEWAY.stream_delta(key_id)
         finally:
+            GATEWAY.stream_stop(key_id)
             if in_t == 0 and out_t == 0:
                 in_t, out_t = _estimate_tokens(raw_body, "".join(completion))
             latency_ms = round((time.monotonic() - t0) * 1000)
             _record_usage(
                 key_id, status, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
             )
+            _release_slot(key_id, key_sem)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

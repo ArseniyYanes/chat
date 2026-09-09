@@ -60,7 +60,7 @@ monitoring-app/
 │   ├── main.py                # FastAPI app (все эндпоинты, §5)
 │   └── migrations/002_api_keys.sql   # опциональная явная миграция
 ├── frontend/
-│   ├── index.html             # вкладки: Обзор / Запросы / API-ключи / Админка
+│   ├── index.html             # вкладки: Обзор / Запросы / Нагрузка / API-ключи / Админка
 │   └── src/{main.js,app.js,api.js,style.css}
 
 ## 3. Схема БД (PostgreSQL / TimescaleDB)
@@ -151,6 +151,7 @@ latest, history:* и пр.                                   — кэши API (T
 | **GET `/api/keys/{id}/stats`** | Basic | daily tokens/requests за 7 дней (миниграфик) |
 | **GET `/api/keys/{id}/usage?limit=`** | Basic | последние N запросов ключа |
 | **GET `/api/keys/summary`** | Basic | сводка: итоги по всем ключам, today, 7-д series, per-key, URL прокси |
+| **GET `/api/keys/live`** | Basic | живая нагрузка: active/queued/streams/tps (tok/s) по каждому ключу, итоги, лимиты (§6) |
 | **POST `/v1/chat/completions`** | **Bearer API-ключ** | GATEWAY (§6) |
 | GET `/{path}` | — | статика фронтенда (SPA fallback → index.html) |
 
@@ -165,6 +166,16 @@ admin/admin), кроме `/api/health`. `/v1/*` — Bearer API-ключ (SHA256 
       нет строки / is_active = FALSE  → 401 {"error":{"message":"Invalid API key"}}
 3. rate limit:  Redis INCR apikey:rl:{id}:{мин} > rate_limit?      → 429 Rate limit exceeded
 4. token limit: Redis GET apikey:tok:{id}:{день} >= daily_token_limit? → 429 Daily token limit exceeded
+4.1 Конкурентность + очередь (GatewayLoad, in-process):
+    - per-key семафор (GW_PER_KEY_CONCURRENCY, по умолчанию 4) — сколько
+      параллельных запросов (агентов) может держать ОДИН ключ;
+    - global семафор (GW_GLOBAL_CONCURRENCY, по умолчанию 16) — всё вместе;
+    - запросы сверх лимитов ждут в очереди; ожидание > GW_QUEUE_TIMEOUT
+      (по умолчанию 30с) → 503 {"error":{"message":"Gateway is busy: …"}}
+    - слот удерживается ВСЁ время вызова vLLM: non-stream — до получения
+      ответа, stream — до последнего чанка (выпуск в finally генератора);
+    - live-скорость (tok/s) меряется на контент-дельтах SSE в реальном
+      времени; снимок — GET /api/keys/live (вкладка «Нагрузка» дашборда).
 5. stream = body.stream
    ├─ NO (non-stream):
    │    httpx POST {VLLM_API_URL}/v1/chat/completions
@@ -230,6 +241,9 @@ VLLM_API_URL          http://172.17.0.1:8000   # куда проксирует g
 OPEN_WEBUI_URL        http://172.17.0.1:8080   # источник логов запросов
 OPEN_WEBUI_API_TOKEN                                 # (для чтения OWUI-логов)
 VLLM_API_KEY                                          # опц. секрет vLLM (2-й уровень защиты)
+GW_PER_KEY_CONCURRENCY  4              # параллельных запросов на ключ (агентов)
+GW_GLOBAL_CONCURRENCY   16             # параллельных запросов по всем ключам
+GW_QUEUE_TIMEOUT        30             # сек ожидания в очереди, потом 503
 MASTER_PASSWORD     apiopenlabs          # для POST /api/keys
 ADMIN_USER / MONITORING_PASSWORD  admin/admin   # Basic auth дашборда
 COLLECT_INTERVAL    10                   # период сбора метрик, сек
@@ -261,7 +275,9 @@ Prometheus (vllm:prompt_tokens_total и т.п. — глобально по се�
 ## 9. Фронтенд
 
 - SPA без бандла-фреймворка: index.html + src/app.js (Vanilla JS) + Chart.js.
-- Вкладки: Обзор (метрики, графики), Запросы (логи), **API-ключи** (новые), Админка.
+- Вкладки: Обзор (метрики, графики), Запросы (логи), **Нагрузка** (живая
+  диагностика шлюза: активные/ожидающие запросы, скорость tok/s по ключам,
+  автообновление 3с из /api/keys/live), **API-ключи** (новые), Админка.
 - «API-ключи»: карточки (статус ●, метрики, mini-бар 7 дней из /stats,
   история запросов из /usage), панель-сводка из /summary, модалка генерации
   (название, лимиты, мастер-пароль) и reveal-модалка «ключ показан один раз».

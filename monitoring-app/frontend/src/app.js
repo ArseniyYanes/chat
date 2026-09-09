@@ -3,6 +3,7 @@ import {
   getLatest, getHistory, getRequests, restartService, testRequest,
   getSettings, putSettings, getActions, notifyTest,
   getKeys, createKey, blockKey, unblockKey, deleteKey, getKeyStats, getKeyUsage, getKeysSummary,
+  getKeysLive,
   fmtBytes, fmtRate, fmtMs, fmtPct, fmtTs, fmtNum,
 } from './api.js';
 
@@ -749,6 +750,33 @@ function bindKeys() {
   });
 }
 
+// --- Gateway live load ------------------------------------------------------
+
+async function loadLive() {
+  let d;
+  try {
+    d = await getKeysLive();
+  } catch (err) {
+    if (state.tab === 'load') toast(`Нагрузка: ${err.message}`, 'err');
+    return;
+  }
+  $('#lv-active').textContent = d.totals.active;
+  $('#lv-queued').textContent = d.totals.queued;
+  $('#lv-online').textContent = d.totals.keys_online;
+  $('#lv-tps').textContent = d.totals.tps ? `${fmtNum(d.totals.tps)} ток/с` : '—';
+  $('#load-limits').textContent =
+    `до ${d.limits.per_key} на ключ · ${d.limits.global} всего · таймаут очереди ${d.limits.queue_timeout_s} с`;
+  $('#load-updated').textContent = `обновлено ${new Date().toLocaleTimeString()}`;
+  const rows = d.keys.map((r) => {
+    const cls = r.active ? ' class="live-row"' : '';
+    return `<tr${cls}><td>${esc(r.name)}${r.blocked ? ' 🚫' : ''}</td>` +
+      `<td>${r.active}</td><td>${r.streams}</td><td>${r.queued}</td>` +
+      `<td>${r.tps ? fmtNum(r.tps) : '—'}</td></tr>`;
+  });
+  $('#load-table tbody').innerHTML =
+    rows.join('') || '<tr><td colspan="5" class="muted">Нет ключей</td></tr>';
+}
+
 function switchTab(name) {
   state.tab = name;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
@@ -756,6 +784,7 @@ function switchTab(name) {
   if (name === 'requests') loadRequests();
   if (name === 'keys') loadKeys();
   if (name === 'admin') loadAdmin();
+  if (name === 'load') loadLive();
 }
 
 export function init() {
@@ -770,6 +799,9 @@ export function init() {
   setInterval(() => {
     if (document.visibilityState === 'visible') refreshLatest();
   }, 10000);
+  setInterval(() => {
+    if (state.tab === 'load' && document.visibilityState === 'visible') loadLive();
+  }, 3000);
 }
 
 
