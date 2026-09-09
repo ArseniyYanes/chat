@@ -35,6 +35,10 @@ services:
       DATABASE_URL: postgresql+psycopg2://monitoring:monitoring@db:5432/monitoring
       REDIS_URL: redis://redis:6379/0
       VLLM_API_URL: ${VLLM_API_URL:-http://172.17.0.1:8000}
+      # vLLM's own --api-key (defense-in-depth). Must match the secret vLLM
+      # was started with, otherwise every proxied /v1/chat/completions
+      # request gets 401 from vLLM. Leave empty only if vLLM has no --api-key.
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
       # Gateway concurrency / queue (see main.py GatewayLoad):
       # parallel requests per key / overall, and max queue wait before 503.
       GW_PER_KEY_CONCURRENCY: ${GW_PER_KEY_CONCURRENCY:-4}

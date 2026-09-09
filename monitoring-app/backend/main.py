@@ -1054,10 +1054,9 @@ async def vllm_chat_completions(request: Request):
     key = _lookup_key(_bearer_key(request))
     if not key or not key.is_active:
         return JSONResponse(status_code=401, content={"error": {"message": "Invalid API key"}})
-    if not apiproxy.check_rate_limit(key.id, key.rate_limit):
-        return JSONResponse(status_code=429, content={"error": {"message": "Rate limit exceeded"}})
-    if not apiproxy.check_daily_tokens(key.id, key.daily_token_limit):
-        return JSONResponse(status_code=429, content={"error": {"message": "Daily token limit exceeded"}})
+    # NOTE: per-key rate limit / daily token checks were disabled (keys
+    # created outside the UI may lack those columns; limits are enforced
+    # by the gateway concurrency slots below and by vLLM itself).
     key_id = key.id
 
     # Concurrency limits + real queue (see GatewayLoad).  The slot is held for
