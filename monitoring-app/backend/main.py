@@ -842,7 +842,24 @@ class GatewayLoad:
 
     def _stat(self, key_id: str) -> dict:
         # Must be called with self._lock held.
-        return self._stats.setdefault(key_id, {"active": 0, "queued": 0, "streams": []})
+        return self._stats.setdefault(
+            key_id,
+            {
+                "active": 0,
+                "queued": 0,
+                "streams": [],
+                # wall durations (seconds) of completed requests — the
+                # «время ожидания» column: from request arrival at the gateway
+                # (incl. queue wait) until the full response is delivered
+                "durations": collections.deque(maxlen=100),
+            },
+        )
+
+    def record_duration(self, key_id: str, secs: float):
+        with self._lock:
+            st = self._stats.get(key_id)
+            if st:
+                st["durations"].append(max(0.0, float(secs)))
 
     def queued_inc(self, key_id):
         with self._lock:
@@ -894,13 +911,16 @@ class GatewayLoad:
                         elapsed = now - s["t0"]
                         if elapsed >= 0.5:
                             tps += s["deltas"] / elapsed
+                durs = list(st["durations"])
                 rows.append({
                     "key_id": key_id,
                     "active": st["active"],
                     "queued": st["queued"],
                     "streams": len(st["streams"]),
                     "tps": round(tps, 1),
+                    "wait_ms": int(sum(durs) / len(durs) * 1000) if durs else None,
                 })
+        all_durs = [d for st in self._stats.values() for d in st["durations"]]
         rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
         return {
             "limits": {
@@ -913,6 +933,8 @@ class GatewayLoad:
                 "queued": sum(r["queued"] for r in rows),
                 "keys_online": sum(1 for r in rows if r["active"] or r["queued"]),
                 "tps": round(sum(r["tps"] for r in rows), 1),
+                "wait_ms": int(sum(all_durs) / len(all_durs) * 1000)
+                if all_durs else None,
             },
             "keys": rows,
         }
@@ -1012,6 +1034,7 @@ def keys_live(user: str = Depends(require_auth), db=Depends(get_db)):
             "queued": l.get("queued", 0),
             "streams": l.get("streams", 0),
             "tps": l.get("tps", 0.0),
+            "wait_ms": l.get("wait_ms"),
         })
     rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
     snap["keys"] = rows
@@ -1126,6 +1149,9 @@ async def vllm_chat_completions(request: Request):
     # Concurrency limits + real queue (see GatewayLoad).  The slot is held for
     # the whole vLLM call, including stream generation (released in the
     # generator's finally for streaming requests).
+    # Wall time of the whole request (queue wait + generation) — shown as
+    # «время ожидания» on the load tab.
+    req_t0 = time.monotonic()
     try:
         key_sem = await _acquire_slot(key_id)
     except GatewayQueueTimeout as qt:
@@ -1179,6 +1205,7 @@ async def vllm_chat_completions(request: Request):
             url, fwd_body, fwd_headers, raw_body, key_id, client_ip
         )
         _release_slot(key_id, key_sem)
+        GATEWAY.record_duration(key_id, time.monotonic() - req_t0)
         return response
 
     async def gen():
@@ -1225,6 +1252,7 @@ async def vllm_chat_completions(request: Request):
                 key_id, status, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
             )
             _release_slot(key_id, key_sem)
+            GATEWAY.record_duration(key_id, time.monotonic() - req_t0)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

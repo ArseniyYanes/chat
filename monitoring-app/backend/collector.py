@@ -358,19 +358,19 @@ class Collector:
         return out or None
 
     # --------------------------------------------------------------- services
-    async def ping(self, url: str, version_url: str = None) -> dict:
+    async def ping(self, url: str, version_url: str = None, headers: dict = None) -> dict:
         t0 = time.time()
         up = False
         version = None
         try:
-            r = await self.client.get(url)
+            r = await self.client.get(url, headers=headers)
             up = r.status_code < 500
         except Exception:
             pass
         latency = int((time.time() - t0) * 1000)
         if up and version_url:
             try:
-                r = await self.client.get(version_url)
+                r = await self.client.get(version_url, headers=headers)
                 if r.status_code == 200:
                     version = r.json().get("version")
             except Exception:
@@ -421,9 +421,15 @@ class Collector:
             sysm = self.system_snapshot()
             gpu = self.gpu_snapshot()
             vllm = await self.vllm_snapshot()
+            # vLLM запущен с --api-key: без Bearer-токена /v1/models отдаёт 401
+            vllm_headers = (
+                {"Authorization": f"Bearer {CFG.vllm_api_key}"} if CFG.vllm_api_key else None
+            )
             services = {
                 "vllm": await self.ping(
-                    CFG.vllm_url + "/v1/models", CFG.vllm_url + "/version"
+                    CFG.vllm_url + "/v1/models",
+                    CFG.vllm_url + "/version",
+                    vllm_headers,
                 ),
                 "openwebui": await self.ping(
                     CFG.openwebui_url + "/health", CFG.openwebui_url + "/api/version"

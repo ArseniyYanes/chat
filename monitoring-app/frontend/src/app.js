@@ -842,10 +842,11 @@ async function loadLive() {
     const cls = r.active ? ' class="live-row"' : '';
     return `<tr${cls}><td>${esc(r.name)}${r.blocked ? ' 🚫' : ''}</td>` +
       `<td>${r.active}</td><td>${r.streams}</td><td>${r.queued}</td>` +
-      `<td>${r.tps ? fmtNum(r.tps) : '—'}</td></tr>`;
+      `<td>${r.tps ? fmtNum(r.tps) : '—'}</td>` +
+      `<td>${r.wait_ms != null ? `${(r.wait_ms / 1000).toFixed(1)} с` : '—'}</td></tr>`;
   });
   $('#load-table tbody').innerHTML =
-    rows.join('') || '<tr><td colspan="5" class="muted">Нет ключей</td></tr>';
+    rows.join('') || '<tr><td colspan="6" class="muted">Нет ключей</td></tr>';
   loadLiveHistory();
 }
 
