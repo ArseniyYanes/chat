@@ -848,14 +848,30 @@ class GatewayLoad:
                 "active": 0,
                 "queued": 0,
                 "streams": [],
-                # wall durations (seconds) of completed requests — the
-                # «время ожидания» column: from request arrival at the gateway
-                # (incl. queue wait) until the full response is delivered
+                # wall durations (seconds) of completed requests (kept for
+                # internal tooling)
                 "durations": collections.deque(maxlen=100),
+                # time-to-first-token (seconds) of completed requests — the
+                # «Время ожидания» column: from request arrival at the gateway
+                # (incl. queue wait) until the model's FIRST token is delivered
+                "ttfts": collections.deque(maxlen=100),
             },
         )
 
     def record_duration(self, key_id: str, secs: float):
+        """Non-streaming call: total duration doubles as TTFT."""
+        with self._lock:
+            st = self._stats.get(key_id)
+            if st:
+                st["durations"].append(max(0.0, float(secs)))
+                # Non-streaming calls have no earlier signal than the final
+                # response, so TTFT == total duration and the dashboard
+                # column uses it directly.
+                st["ttfts"].append(max(0.0, float(secs)))
+
+    def record_total(self, key_id: str, secs: float):
+        """Streaming call: full duration only; TTFT was recorded by
+        stream_delta() at the first token."""
         with self._lock:
             st = self._stats.get(key_id)
             if st:
@@ -881,18 +897,30 @@ class GatewayLoad:
             if st and st["active"] > 0:
                 st["active"] -= 1
 
-    def stream_start(self, key_id):
+    def stream_start(self, key_id, req_start: float = None):
         with self._lock:
-            self._stat(key_id)["streams"].append({"t0": None, "deltas": 0})
+            self._stat(key_id)["streams"].append(
+                {
+                    "t0": None,
+                    "deltas": 0,
+                    # gateway entry time (request arrival, before the queue) —
+                    # the TTFT reference point
+                    "start": req_start if req_start is not None else time.monotonic(),
+                }
+            )
 
     def stream_delta(self, key_id):
         with self._lock:
-            streams = self._stat(key_id)["streams"]
+            st = self._stats.get(key_id)
+            streams = st["streams"] if st else []
             if streams:
                 s = streams[-1]
                 s["deltas"] += 1
                 if s["t0"] is None:
                     s["t0"] = time.monotonic()
+                    # First content token of this stream → record TTFT
+                    # (arrival at the gateway incl. queue wait → first token).
+                    st["ttfts"].append(max(0.0, s["t0"] - s["start"]))
 
     def stream_stop(self, key_id):
         with self._lock:
@@ -911,16 +939,17 @@ class GatewayLoad:
                         elapsed = now - s["t0"]
                         if elapsed >= 0.5:
                             tps += s["deltas"] / elapsed
-                durs = list(st["durations"])
+                ttfts = list(st["ttfts"])
                 rows.append({
                     "key_id": key_id,
                     "active": st["active"],
                     "queued": st["queued"],
                     "streams": len(st["streams"]),
                     "tps": round(tps, 1),
-                    "wait_ms": int(sum(durs) / len(durs) * 1000) if durs else None,
+                    "wait_ms": int(sum(ttfts) / len(ttfts) * 1000)
+                    if ttfts else None,
                 })
-        all_durs = [d for st in self._stats.values() for d in st["durations"]]
+        all_ttfts = [d for st in self._stats.values() for d in st["ttfts"]]
         rows.sort(key=lambda r: (-(r["active"] + r["queued"]), -r["tps"]))
         return {
             "limits": {
@@ -933,8 +962,8 @@ class GatewayLoad:
                 "queued": sum(r["queued"] for r in rows),
                 "keys_online": sum(1 for r in rows if r["active"] or r["queued"]),
                 "tps": round(sum(r["tps"] for r in rows), 1),
-                "wait_ms": int(sum(all_durs) / len(all_durs) * 1000)
-                if all_durs else None,
+                "wait_ms": int(sum(all_ttfts) / len(all_ttfts) * 1000)
+                if all_ttfts else None,
             },
             "keys": rows,
         }
@@ -1149,8 +1178,8 @@ async def vllm_chat_completions(request: Request):
     # Concurrency limits + real queue (see GatewayLoad).  The slot is held for
     # the whole vLLM call, including stream generation (released in the
     # generator's finally for streaming requests).
-    # Wall time of the whole request (queue wait + generation) — shown as
-    # «время ожидания» on the load tab.
+    # Request arrival at the gateway — start point for the load tab's
+    # «Время ожидания» (time to first token, queue wait included).
     req_t0 = time.monotonic()
     try:
         key_sem = await _acquire_slot(key_id)
@@ -1213,7 +1242,7 @@ async def vllm_chat_completions(request: Request):
         status = 200
         completion = []
         t0 = time.monotonic()
-        GATEWAY.stream_start(key_id)
+        GATEWAY.stream_start(key_id, req_t0)
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 async with client.stream(
@@ -1252,7 +1281,9 @@ async def vllm_chat_completions(request: Request):
                 key_id, status, in_t, out_t, "/v1/chat/completions", client_ip, latency_ms
             )
             _release_slot(key_id, key_sem)
-            GATEWAY.record_duration(key_id, time.monotonic() - req_t0)
+            # TTFT already recorded on the first token (stream_delta); keep
+            # the full request duration for internal tooling.
+            GATEWAY.record_total(key_id, time.monotonic() - req_t0)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

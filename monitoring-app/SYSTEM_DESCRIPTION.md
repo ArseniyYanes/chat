@@ -151,7 +151,7 @@ latest, history:* и пр.                                   — кэши API (T
 | **GET `/api/keys/{id}/stats`** | Basic | daily tokens/requests за 7 дней (миниграфик) |
 | **GET `/api/keys/{id}/usage?limit=`** | Basic | последние N запросов ключа |
 | **GET `/api/keys/summary`** | Basic | сводка: итоги по всем ключам, today, 7-д series, per-key, URL прокси |
-| **GET `/api/keys/live`** | Basic | живая нагрузка: active/queued/streams/tps (tok/s) по каждому ключу, среднее время ожидания ответа (`wait_ms`), итоги, лимиты (§6) |
+| **GET `/api/keys/live`** | Basic | живая нагрузка: active/queued/streams/tps (tok/s) по каждому ключу, среднее время до первого токена `wait_ms` (TTFT, с учётом очереди), итоги, лимиты (§6) |
 | **GET `/api/keys/live/history`** | Basic | история нагрузки за последний час (шаг 10 с): active/queued/tps — график на вкладке «Нагрузка» |
 | **POST `/v1/chat/completions`** | **Bearer API-ключ** | GATEWAY (§6) |
 | GET `/{path}` | — | статика фронтенда (SPA fallback → index.html) |
